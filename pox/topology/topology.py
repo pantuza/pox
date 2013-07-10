@@ -88,7 +88,12 @@ class SwitchConnectionUp(SwitchEvent):
 
 class SwitchConnectionDown(SwitchEvent): pass
 
-class HostEvent (EntityEvent): pass
+class HostEvent (EntityEvent):
+  """ Host Event. When hosts are identified this event raises """  
+  def __init__(self, host):
+    super(HostEvent, self).__init__(host)
+    self.host = host
+
 class HostJoin (HostEvent): pass
 class HostLeave (HostEvent): pass
 
@@ -146,8 +151,13 @@ class Host (Entity):
   """
   A generic Host entity.
   """
-  def __init__(self,id=None):
+  def __init__(self,id=None, mac=None, ip=None, dpid=None):
     Entity.__init__(self, id)
+    self.mac = mac
+    self.ip = ip
+    
+    self.switch = core.topology.getEntityByID(dpid)
+    
 
 class Switch (Entity):
   """
