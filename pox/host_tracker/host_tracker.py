@@ -41,11 +41,11 @@ from pox.lib.packet.arp import arp
 
 from pox.lib.recoco.recoco import Timer
 
-import pox.openflow.libopenflow_01 as of
-
-import pox.openflow.discovery as discovery
+from pox.openflow import libopenflow_01 as of
 
 from pox.lib.revent.revent import *
+
+from pox.topology.topology import Host
 
 import time
 
@@ -151,14 +151,18 @@ class MacEntry (Alive):
 
 
 class host_tracker (EventMixin):
+
+  
   def __init__ (self):
-    
     # The following tables should go to Topology later
     self.entryByMAC = {}
     self._t = Timer(timeoutSec['timerInterval'],
                    self._check_timeouts, recurring=True)
     self.listenTo(core)
+    if core.hasComponent("DHCPD"):
+      core.DHCPD.addListenerByName('DHCPLease', self._handle_DHCPLease)
     log.info("host_tracker ready")
+ 
 
   # The following two functions should go to Topology also
   def getMacEntry(self, macaddr):
@@ -210,6 +214,19 @@ class host_tracker (EventMixin):
 
     return ( None, False )
 
+  def _handle_DHCPLease (self, event):
+    """ DHCPLease event listener 
+    
+      If a DHCP Lease is fired, this method updates the IP info
+    """
+    macEntry = self.getMacEntry(event.host_mac)
+
+    if macEntry is not None:
+      self.updateIPInfo(event.ip, macEntry, True)
+    
+      log.info("Learned %s got IP %s from DHCPLease", str(event.host_mac),
+               str(event.ip))
+
   def updateIPInfo(self, pckt_srcip, macEntry, hasARP):
     """ If there is IP info in the incoming packet, update the macEntry
     accordingly. In the past we assumed a 1:1 mapping between MAC and IP
@@ -247,6 +264,7 @@ class host_tracker (EventMixin):
     dpid = event.connection.dpid
     inport = event.port
     packet = event.parse()
+
     if not packet.parsed:
       log.warning("%i %i ignoring unparsed packet", dpid, inport)
       return
@@ -264,12 +282,13 @@ class host_tracker (EventMixin):
 
     # Learn or update dpid/port/MAC info
     macEntry = self.getMacEntry(packet.src)
-    if macEntry == None:
+    if macEntry is None:
       # there is no known host by that MAC
       # should we raise a NewHostFound event (at the end)?
-      macEntry = MacEntry(dpid,inport,packet.src)
+      macEntry = MacEntry(dpid, inport, packet.src)
       self.entryByMAC[packet.src] = macEntry
       log.info("Learned %s", str(macEntry))
+
     elif macEntry != (dpid, inport, packet.src):    
       # there is already an entry of host with that MAC, but host has moved
       # should we raise a HostMoved event (at the end)?
@@ -285,12 +304,14 @@ class host_tracker (EventMixin):
       macEntry.inport = inport
 
     macEntry.refresh()
-
+    
     (pckt_srcip, hasARP) = self.getSrcIPandARP(packet.next)
-    if pckt_srcip != None:
+    if pckt_srcip is not None:
       self.updateIPInfo(pckt_srcip,macEntry,hasARP)
 
-    return
+    if core.topology.getEntityByID(macEntry.macaddr) is None:
+      host = Host(id=macEntry.macaddr, mac=macEntry.macaddr, ip=pckt_srcip)
+      core.topology.addEntity(host)
 
   def _check_timeouts(self):
     for macEntry in self.entryByMAC.values():
