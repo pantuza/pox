@@ -32,8 +32,6 @@ from pox.core import core
 import pox
 log = core.getLogger()
 
-#import logging
-#log.setLevel(logging.WARN)
 
 from pox.lib.packet.ethernet import ethernet
 from pox.lib.packet.ipv4 import ipv4
@@ -320,8 +318,14 @@ class host_tracker (EventMixin):
         if ipEntry.expired():
           if ipEntry.pings.failed():
             del macEntry.ipAddrs[ip_addr]
+
+            # removes host of the topology. HostLeave will be fired
+            host = core.topology.getEntityByID(macEntry.macaddr)
+            if host:
+              core.topology.removeEntity(host)
+
             log.info("Entry %s: IP address %s expired",
-                    str(macEntry), str(ip_addr) )
+                    str(macEntry), str(ip_addr))
           else: 
             self.sendPing(macEntry,ip_addr)
             ipEntry.pings.sent()
