@@ -13,7 +13,7 @@ class GraphEntity (object):
 class Vertex (GraphEntity):
   
   def __init__ (self, entity):
-    super.__init__(entity)
+    super(Vertex, self).__init__(entity)
     self.adjacency = {}
     
   def add_adjacency (self, vertex, link = None):
@@ -42,8 +42,8 @@ class Edge (GraphEntity):
       return (link.entity2.id, link.entity1.id)
 
   def __init__ (self, link):
-    super.__init__(link)
-    self.key = _make_key(link)
+    super(Edge, self).__init__(link)
+    self.key = Edge._make_key(link)
 
 
 class Graph (object):
@@ -147,11 +147,10 @@ class Graph (object):
 
     edge = Edge(link)
     self.edges[link.id] = edge
-    v1 = get_vertex(link.entity1.id)
-    if v1:
+    v1 = self.get_vertex(link.entity1.id)
+    v2 = self.get_vertex(link.entity2.id)
+    if v1 and v2:
       v1.add_adjacency(v2, link)
-    v2 = get_vertex(link.entity2.id)
-    if v2:
       v2.add_adjacency(v1, link)
 
   def remove_edge (self, link):
@@ -160,10 +159,11 @@ class Graph (object):
       raise Exception("Link ID %s is not in graph" % str(link.id))
 
     del self.edges[link.id]
-    v1 = get_vertex(link.entity1.id)
-    v2 = get_vertex(link.entity2.id)
-    v1.remove_adjacency(v2)
-    v2.remove_adjacency(v1)
+    v1 = self.get_vertex(link.entity1.id)
+    v2 = self.get_vertex(link.entity2.id)
+    if v1 and v2:
+      v1.remove_adjacency(v2)
+      v2.remove_adjacency(v1)
 
 
 def launch ():
