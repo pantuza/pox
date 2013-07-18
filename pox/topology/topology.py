@@ -97,12 +97,12 @@ class HostEvent (EntityEvent):
 class HostJoin (HostEvent): pass
 class HostLeave (HostEvent): pass
 
-class LinkEvent (Event):
+class LinkEvent (EntityEvent):
   """ Link Event. When link are identified this event raises """  
-  def __init__ (self, sw1, sw2):
+  def __init__ (self, link):
+    super(LinkEvent, self).__init__(link)
     Event.__init__(self)
-    self.sw1 = sw1
-    self.sw2 = sw2
+    self.link = link
 
 class LinkJoin (LinkEvent): pass
 class LinkLeave (LinkEvent): pass
@@ -161,7 +161,7 @@ class Host (Entity):
   """
   A generic Host entity.
   """
-  def __init__(self,id=None, mac=None, ip=None, dpid=None):
+  def __init__ (self, id=None, mac=None, ip=None, dpid=None):
     Entity.__init__(self, id)
     self.mac = mac
     self.ip = ip
@@ -185,6 +185,14 @@ class Port (Entity):
     self.number = num
     self.hwAddr = EthAddr(hwAddr)
     self.name = name
+
+class Link (Entity):
+  def __init__ (self, entity1, entity2, port1 = None, port2 = None):
+    Entity.__init__(self, (entity1, entity2, port1, port2))
+    self.entity1 = entity1
+    self.entity2 = entity2
+    self.port1 = port1
+    self.port2 = port2
 
 class Controller (Entity):
   def __init__(self, name, handshake_complete=False):
@@ -258,11 +266,13 @@ class Topology (EventMixin):
     else:
       self.raiseEvent(EntityJoin, entity)
 
-  def addLink (self, sw1, sw2):
-    self.raiseEvent(LinkJoin, sw1, sw2)
+  def addLink (self, entity1, entity2, port1 = None, port2 = None):
+    link = Link(entity1, entity2, port1, port2)
+    self.raiseEvent(LinkJoin, link)
 
-  def removeLink (self, sw1, sw2):
-    self.raiseEvent(LinkLeave, sw1, sw2)
+  def removeLink (self, entity1, entity2, port1 = None, port2 = None):
+    link = Link(entity1, entity2, port1, port2)
+    self.raiseEvent(LinkLeave, link)
 
   def getEntitiesOfType (self, t=Entity, subtypes=True):
     if subtypes is False:

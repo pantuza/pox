@@ -190,7 +190,7 @@ class host_tracker (EventMixin):
     else:
       # macEntry is stale, remove it.
       log.debug("%i %i ERROR sending ARP REQ to %s %s",
-                macEntry.dpid, macEntry.port, str(r.hwdst), str(r.protodst))
+                macEntry.dpid, macEntry.port, str(r.hwdst), str(r.protodst))  
       del macEntry.ipAddrs[ipAddr]
     return
 
