@@ -62,19 +62,19 @@ class Graph (object):
   def _handle_LinkEvent (self, event):
     self.log.info("LinkEvent fired")
 
-  def add_vertex(self, entity):
+  def add_vertex (self, entity):
     
     if entity.id not in self.vertexes:
       self.vertexes[entity.id] = entity
   
-  def get_vertex(self, id=None):
+  def get_vertex (self, id=None):
     
     try:
       return self.vertexes[id]
     except IndexError:
       return None
 
-  def add_edge(self, switch, host):
+  def add_edge (self, switch, host):
     try:
       self.edges[switch.id].append(host.id)
     except KeyError:
