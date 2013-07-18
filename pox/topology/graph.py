@@ -27,9 +27,6 @@ class Graph (object):
       core.topology.addListenerByName("EntityLeave", self._handle_EntityLeave)
       core.topology.addListenerByName("EntityLeave", self._handle_EntityLeave)
 
-    #if core.hasComponent("openflow_discovery"):
-    #  core.openflow_discovery.addListenerByName("LinkEvent", 
-    #                                            self._handle_LinkEvent)
 
   def _handle_SwitchJoin (self, event):
     self.log.info("SwitchJoin id: %s", str(event.switch.id))
