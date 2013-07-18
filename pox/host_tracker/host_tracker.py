@@ -28,26 +28,22 @@ Timer configuration can be changed when needed (e.g., for debugging) using
 the launch facility (check timeoutSec dict and PingCtrl.pingLim).
 """
 
+import time
+import string
+
 from pox.core import core
-import pox
-log = core.getLogger()
-
-
 from pox.lib.packet.ethernet import ethernet
 from pox.lib.packet.ipv4 import ipv4
 from pox.lib.packet.arp import arp
-
 from pox.lib.recoco.recoco import Timer
-
+from pox.lib.revent.revent import EventMixin
 from pox.openflow import libopenflow_01 as of
-
-from pox.lib.revent.revent import *
-
 from pox.topology.topology import Host
 
-import time
 
-import string
+# Configure log
+log = core.getLogger()
+
 
 # Times (in seconds) to use for differente timouts:
 timeoutSec = dict(
@@ -57,14 +53,16 @@ timeoutSec = dict(
   timerInterval=5, # Seconds between timer routine activations
   entryMove=60     # Minimum expected time to move a physical entry
   )
+
 # Good values for testing:
 #  --arpAware=15 --arpSilent=45 --arpReply=1 --entryMove=4
 # Another parameter that may be used:
 # --pingLim=2
 
+
 class Alive (object):
-  """ Holds liveliness information for MAC and IP entries
-  """
+  """ Holds liveliness information for MAC and IP entries """
+
   def __init__ (self, livelinessInterval=timeoutSec['arpAware']):
     self.lastTimeSeen = time.time()
     self.interval=livelinessInterval
@@ -77,13 +75,13 @@ class Alive (object):
 
 
 class PingCtrl (Alive):
-  """ Holds information for handling ARP pings for hosts
-  """
+  """ Holds information for handling ARP pings for hosts """
+
   # Number of ARP ping attemps before deciding it failed
   pingLim=3
 
   def __init__ (self):
-    Alive.__init__(self, timeoutSec['arpReply'])
+    super(PingCtrl, self).__init__(timeoutSec['arpReply'])
     self.pending = 0
 
   def sent (self):
@@ -104,15 +102,18 @@ class IpEntry (Alive):
   be kept in the macEntry object's ipAddrs dictionary. At least for now,
   there is no need to refer to the original macEntry as the code is organized.
   """
+  
   def __init__ (self, hasARP):
     if hasARP:
-      Alive.__init__(self,timeoutSec['arpAware'])
+      super(IpEntry, self).__init__(timeoutSec['arpAware'])
     else:
-      Alive.__init__(self,timeoutSec['arpSilent'])
+      super(IpEntry, self).__init__(timeoutSec['arpSilent'])
+    
     self.hasARP = hasARP
     self.pings = PingCtrl()
 
   def setHasARP (self):
+    
     if not self.hasARP:
       self.hasARP = True
       self.interval = timeoutSec['arpAware']
@@ -125,17 +126,19 @@ class MacEntry (Alive):
   services, and it may replace dpid by a general switch object reference
   We use the port to determine which port to forward traffic out of.
   """
+  
   def __init__ (self, dpid, port, macaddr):
-    Alive.__init__(self)
+    super(MacEntry, self).__init__()
     self.dpid = dpid
     self.port = port
     self.macaddr = macaddr
     self.ipAddrs = {}
 
-  def __str__(self):
+  def __str__ (self):
     return string.join([str(self.dpid), str(self.port), str(self.macaddr)],' ')
 
   def __eq__ (self, other):
+
     if type(other) == type(None):
       return type(self) == type(None)
     elif type(other) == tuple:
@@ -149,28 +152,31 @@ class MacEntry (Alive):
 
 
 class host_tracker (EventMixin):
-
+  """ This component attempts to keep track of hosts in the network 
+    where they are and how they are configured (at least their 
+    MAC/IP addresses)
+  """
   
   def __init__ (self):
     # The following tables should go to Topology later
     self.entryByMAC = {}
     self._t = Timer(timeoutSec['timerInterval'],
-                   self._check_timeouts, recurring=True)
+                    self._check_timeouts, recurring=True)
     self.listenTo(core)
+  
     if core.hasComponent("DHCPD"):
       core.DHCPD.addListenerByName('DHCPLease', self._handle_DHCPLease)
     log.info("host_tracker ready")
  
 
   # The following two functions should go to Topology also
-  def getMacEntry(self, macaddr):
+  def getMacEntry (self, macaddr):
     try:
-      result = self.entryByMAC[macaddr]
+      return self.entryByMAC[macaddr]
     except KeyError as e:
-      result = None
-    return result
+      return None
 
-  def sendPing(self, macEntry, ipAddr):
+  def sendPing (self, macEntry, ipAddr):
     r = arp() # Builds an "ETH/IP any-to-any ARP packet
     r.opcode = arp.REQUEST
     r.hwdst = macEntry.macaddr
@@ -190,9 +196,8 @@ class host_tracker (EventMixin):
       log.debug("%i %i ERROR sending ARP REQ to %s %s",
                 macEntry.dpid, macEntry.port, str(r.hwdst), str(r.protodst))
       del macEntry.ipAddrs[ipAddr]
-    return
 
-  def getSrcIPandARP(self, packet):
+  def getSrcIPandARP (self, packet):
     """
     This auxiliary function returns the source IPv4 address for packets that
     have one (IPv4, ARPv4). Returns None otherwise.
@@ -210,7 +215,7 @@ class host_tracker (EventMixin):
          packet.protosrc != 0:
         return ( packet.protosrc, True )
 
-    return ( None, False )
+    return (None, False)
 
   def _handle_DHCPLease (self, event):
     """ DHCPLease event listener 
@@ -221,11 +226,10 @@ class host_tracker (EventMixin):
 
     if macEntry is not None:
       self.updateIPInfo(event.ip, macEntry, True)
-    
       log.info("Learned %s got IP %s from DHCPLease", str(event.host_mac),
                str(event.ip))
 
-  def updateIPInfo(self, pckt_srcip, macEntry, hasARP):
+  def updateIPInfo (self, pckt_srcip, macEntry, hasARP):
     """ If there is IP info in the incoming packet, update the macEntry
     accordingly. In the past we assumed a 1:1 mapping between MAC and IP
     addresses, but removed that restriction later to accomodate cases 
@@ -242,6 +246,7 @@ class host_tracker (EventMixin):
       ipEntry = IpEntry(hasARP)
       macEntry.ipAddrs[pckt_srcip] = ipEntry
       log.info("Learned %s got IP %s", str(macEntry), str(pckt_srcip) )
+    
     if hasARP:
       ipEntry.pings.received()
 
@@ -311,7 +316,7 @@ class host_tracker (EventMixin):
       host = Host(id=macEntry.macaddr, mac=macEntry.macaddr, ip=pckt_srcip)
       core.topology.addEntity(host)
 
-  def _check_timeouts(self):
+  def _check_timeouts (self):
     for macEntry in self.entryByMAC.values():
       entryPinged = False
       for ip_addr, ipEntry in macEntry.ipAddrs.items():
@@ -330,8 +335,10 @@ class host_tracker (EventMixin):
             self.sendPing(macEntry,ip_addr)
             ipEntry.pings.sent()
             entryPinged = True
+
       if macEntry.expired() and not entryPinged:
         log.info("Entry %s expired", str(macEntry))
+       
         # sanity check: there should be no IP addresses left
         if len(macEntry.ipAddrs) > 0:
           for ip in macEntry.ipAddrs.keys():
