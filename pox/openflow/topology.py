@@ -71,7 +71,9 @@ class OpenFlowTopology (object):
     if event.added:
       sw1.ports[link.port1].addEntity(sw2, single=True)
       sw2.ports[link.port2].addEntity(sw1, single=True)
+      self.topology.addLink(sw1, sw2)
     elif event.removed:
+      self.topology.removeLink(sw1, sw2)
       sw1.ports[link.port1].entities.discard(sw2)
       sw2.ports[link.port2].entities.discard(sw1)
 

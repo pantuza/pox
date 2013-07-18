@@ -97,6 +97,16 @@ class HostEvent (EntityEvent):
 class HostJoin (HostEvent): pass
 class HostLeave (HostEvent): pass
 
+class LinkEvent (Event):
+  """ Link Event. When link are identified this event raises """  
+  def __init__ (self, sw1, sw2):
+    Event.__init__(self)
+    self.sw1 = sw1
+    self.sw2 = sw2
+
+class LinkJoin (LinkEvent): pass
+class LinkLeave (LinkEvent): pass
+
 class Update (Event):
   """
   Fired by Topology whenever anything has changed
@@ -192,6 +202,8 @@ class Topology (EventMixin):
     SwitchLeave,
     HostJoin,
     HostLeave,
+    LinkJoin,
+    LinkLeave,
     EntityJoin,
     EntityLeave,
 
@@ -246,13 +258,19 @@ class Topology (EventMixin):
     else:
       self.raiseEvent(EntityJoin, entity)
 
+  def addLink (self, sw1, sw2):
+    self.raiseEvent(LinkJoin, sw1, sw2)
+
+  def removeLink (self, sw1, sw2):
+    self.raiseEvent(LinkLeave, sw1, sw2)
+
   def getEntitiesOfType (self, t=Entity, subtypes=True):
     if subtypes is False:
       return [x for x in self._entities.itervalues() if type(x) is t]
     else:
       return [x for x in self._entities.itervalues() if isinstance(x, t)]
 
-  def addListener(self, eventType, handler, once=False, weak=False,
+  def addListener (self, eventType, handler, once=False, weak=False,
                   priority=None, byName=False):
     """
     We interpose on EventMixin.addListener to check if the eventType is

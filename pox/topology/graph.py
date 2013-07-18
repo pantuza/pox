@@ -22,12 +22,14 @@ class Graph (object):
       core.topology.addListenerByName("SwitchLeave", self._handle_SwitchLeave)
       core.topology.addListenerByName("HostJoin", self._handle_HostJoin)
       core.topology.addListenerByName("HostLeave", self._handle_HostLeave)
-      core.topology.addListenerByName("EntityJoin", self._handle_EntityJoin)
+      core.topology.addListenerByName("LinkJoin", self._handle_LinkJoin)
+      core.topology.addListenerByName("LinkLeave", self._handle_LinkLeave)
+      core.topology.addListenerByName("EntityLeave", self._handle_EntityLeave)
       core.topology.addListenerByName("EntityLeave", self._handle_EntityLeave)
 
-    if core.hasComponent("openflow_discovery"):
-      core.openflow_discovery.addListenerByName("LinkEvent", 
-                                                self._handle_LinkEvent)
+    #if core.hasComponent("openflow_discovery"):
+    #  core.openflow_discovery.addListenerByName("LinkEvent", 
+    #                                            self._handle_LinkEvent)
 
   def _handle_SwitchJoin (self, event):
     self.log.info("SwitchJoin id: %s", str(event.switch.id))
@@ -59,8 +61,11 @@ class Graph (object):
   def _handle_EntityLeave (self, event):
     self.log.info("EntityLeave event")
 
-  def _handle_LinkEvent (self, event):
-    self.log.info("LinkEvent fired")
+  def _handle_LinkJoin (self, event):
+    self.log.info("LinkJoin fired")
+
+  def _handle_LinkLeave (self, event):
+    self.log.info("LinkLeave fired")
 
   def add_vertex (self, entity):
     
