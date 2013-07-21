@@ -3,48 +3,6 @@
 
 from pox.core import core
 
-class GraphEntity (object):
-  
-  def __init__ (self, entity):
-    self.attrib = {}
-    self.entity = entity
-
-
-class Vertex (GraphEntity):
-  
-  def __init__ (self, entity):
-    super(Vertex, self).__init__(entity)
-    self.adjacency = {}
-    
-  def add_adjacency (self, vertex, link = None):
-    if vertex != self:
-      try:
-        self.adjacency[vertex].append(link)
-      except:
-        self.adjacency[vertex] = [link]
-
-  def remove_adjacency (self, vertex, link = None):
-    try:
-      self.adjacency[vertex].remove(link)
-      if (self.adjacency[vertex].count == 0):
-        del self.adjacency[vertex]
-    except:
-      pass
-
-
-class Edge (GraphEntity):
-  
-  @staticmethod
-  def _make_key (link):
-    if link.entity1.id <= link.entity2.id:
-      return (link.entity1.id, link.entity2.id)
-    else:
-      return (link.entity2.id, link.entity1.id)
-
-  def __init__ (self, link):
-    super(Edge, self).__init__(link)
-    self.key = Edge._make_key(link)
-
 
 class Graph (object):
   """
