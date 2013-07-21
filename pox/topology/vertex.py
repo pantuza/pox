@@ -1,3 +1,5 @@
+from pox.topology.graph_entity import GraphEntity
+
 
 class Vertex (GraphEntity):
   
@@ -19,4 +21,3 @@ class Vertex (GraphEntity):
         del self.adjacency[vertex]
     except:
       pass
-

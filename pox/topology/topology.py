@@ -245,7 +245,7 @@ class Topology (EventMixin):
 
   def removeEntity (self, entity):
     del self._entities[entity.id]
-    del self._all_ids[entity.id]
+    Entity._all_ids.discard(entity.id)
     self.log.info(str(entity) + " left")
     if isinstance(entity, Switch):
       self.raiseEvent(SwitchLeave, entity)

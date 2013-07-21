@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 
-
 from pox.core import core
+
+from pox.topology.edge import Edge
+from pox.topology.vertex import Vertex
 
 
 class Graph (object):

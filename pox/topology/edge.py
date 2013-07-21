@@ -1,3 +1,5 @@
+from pox.topology.graph_entity import GraphEntity
+
 
 class Edge (GraphEntity):
   
