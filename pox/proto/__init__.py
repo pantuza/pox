@@ -1,4 +1,4 @@
-# Copyright 2011-2012 Colin Scott
+# Copyright 2013 James McCauley
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,22 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# TODO: use a unit-testing library for asserts
+"""
+Components and utilities for working with various protocols.
 
-# invoke with:
-#   ./pox.py --script=tests.topology.topology topology
-#
-# Maybe there is a less awkward way to invoke tests...
-
-from pox.core import core
-from pox.lib.revent import *
-
-topology = core.components['topology']
-
-def autobinds_correctly():
-  topology.listenTo(core)
-  return True
-
-if not autobinds_correctly():
-  raise AssertionError("Did no autobind correctly")
-
+This package contains stuff for working with protocols.  In general, this
+does not include stuff for actually working with the wire formats of protocols
+(this is handled by pox.lib.packet).  However, there are helpers for working
+with protocols here, as well as POX implementations of some protocols (e.g.,
+DHCP).
+"""

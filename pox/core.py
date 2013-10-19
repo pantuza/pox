@@ -1,19 +1,16 @@
 # Copyright 2011-2013 James McCauley
 #
-# This file is part of POX.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at:
 #
-# POX is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# POX is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with POX.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 Some of POX's core API and functionality is here, largely in the POXCore
@@ -188,7 +185,11 @@ class POXCore (EventMixin):
   def __init__ (self):
     self.debug = False
     self.running = True
-    self.components = {}
+    self.starting_up = True
+    self.components = {'core':self}
+
+    import threading
+    self.quit_condition = threading.Condition()
 
     self.version = (0,2,0)
     self.version_name = "carp"
@@ -259,28 +260,41 @@ class POXCore (EventMixin):
     Shut down POX.
     """
     import threading
-    if threading.current_thread() is self.scheduler._thread:
+    if (self.starting_up or
+        threading.current_thread() is self.scheduler._thread):
       t = threading.Thread(target=self._quit)
+      t.daemon = True
       t.start()
     else:
       self._quit()
 
   def _quit (self):
-    if self.running:
-      self.running = False
-      log.info("Going down...")
-      import gc
+    # Should probably do locking here
+    if not self.running:
+      return
+    if self.starting_up:
+      # Try again later
+      self.quit()
+      return
+
+    self.running = False
+    log.info("Going down...")
+    import gc
+    gc.collect()
+    self.raiseEvent(GoingDownEvent())
+    self.callLater(self.scheduler.quit)
+    for i in range(50):
+      if self.scheduler._hasQuit: break
       gc.collect()
-      self.raiseEvent(GoingDownEvent())
-      self.callLater(self.scheduler.quit)
-      for i in range(50):
-        if self.scheduler._hasQuit: break
-        gc.collect()
-        time.sleep(.1)
-      if not self.scheduler._allDone:
-        log.warning("Scheduler didn't quit in time")
-      self.raiseEvent(DownEvent())
-      log.info("Down.")
+      time.sleep(.1)
+    if not self.scheduler._allDone:
+      log.warning("Scheduler didn't quit in time")
+    self.raiseEvent(DownEvent())
+    log.info("Down.")
+    #logging.shutdown()
+    self.quit_condition.acquire()
+    self.quit_condition.notifyAll()
+    core.quit_condition.release()
 
   def _get_python_version (self):
     try:
@@ -316,10 +330,17 @@ class POXCore (EventMixin):
       l.warn("POX requires Python 2.7. You're running %s.", vers)
       l.warn("If you run into problems, try using Python 2.7 or PyPy.")
 
+    self.starting_up = False
     self.raiseEvent(GoingUpEvent())
 
     self.raiseEvent(UpEvent())
 
+    self._waiter_notify()
+
+    if self.running:
+      log.info(self.version_string + " is up.")
+
+  def _waiter_notify (self):
     if len(self._waiters):
       waiting_for = set()
       for entry in self._waiters:
@@ -333,9 +354,6 @@ class POXCore (EventMixin):
       #log.info("%i things still waiting on %i components"
       #         % (names, waiting_for))
       log.warn("Still waiting on %i component(s)" % (len(waiting_for),))
-
-    if self.running:
-      log.info(self.version_string + " is up.")
 
   def hasComponent (self, name):
     """
@@ -380,12 +398,15 @@ class POXCore (EventMixin):
     self.components[name] = component
     self.raiseEventNoErrors(ComponentRegistered, name, component)
     self._try_waiters()
-    
+
   def call_when_ready (self, callback, components=[], name=None, args=(),
                        kw={}):
     """
     Calls a callback when components are ready.
     """
+    if callback is None:
+      callback = lambda:None
+      callback.func_name = "<None>"
     if isinstance(components, basestring):
       components = [components]
     elif isinstance(components, set):
@@ -448,7 +469,7 @@ class POXCore (EventMixin):
     Tries to satisfy all component-waiting callbacks
     """
     changed = True
-    
+
     while changed:
       changed = False
       for entry in list(self._waiters):
@@ -470,7 +491,7 @@ class POXCore (EventMixin):
     2) Call "_all_dependencies_met" on *sink* if it exists
     3) If attrs=True, set attributes on *sink* for each component
        (e.g, sink._openflow_ would be set to core.openflow)
-    
+
     For example, if topology is a dependency, a handler for topology's
     SwitchJoin event must be defined as so:
        def _handle_topology_SwitchJoin (self, ...):
@@ -524,10 +545,32 @@ class POXCore (EventMixin):
     self.call_when_ready(done, components, name=sink.__class__.__name__,
                          args=(sink,components,attrs,short_attrs))
 
+    if not self.starting_up:
+      self._waiter_notify()
 
   def __getattr__ (self, name):
     if name not in self.components:
       raise AttributeError("'%s' not registered" % (name,))
     return self.components[name]
 
-core = POXCore()
+
+core = None
+
+def initialize ():
+  global core
+  core = POXCore()
+  return core
+
+# The below is a big hack to make tests and doc tools work.
+# We should do something better.
+def _maybe_initialize ():
+  import sys
+  if 'unittest' in sys.modules or 'nose' in sys.modules:
+    initialize()
+    return
+  import __main__
+  mod = getattr(__main__, '__file__', '')
+  if 'pydoc' in mod:
+    initialize()
+    return
+_maybe_initialize()

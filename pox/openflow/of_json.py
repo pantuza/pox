@@ -1,19 +1,16 @@
 # Copyright 2011,2012 James McCauley
 #
-# This file is part of POX.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at:
 #
-# POX is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# POX is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with POX.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 Various stuff for converting between OpenFlow and JSON-friendly
@@ -97,6 +94,7 @@ def _unfix_port (v):
 def _unfix_ip (v):
   v = v()
   if v[1] == 0:
+    if v[0] is None: return None
     return str(v[0])
   return "%s/%i" % v
 def _unfix_str (v):
@@ -122,7 +120,9 @@ def match_to_dict (m):
   for k,func in _unfix_map.iteritems():
     v = getattr(m, k)
     if v is None: continue
+    if k.startswith('get_'): k = k[4:]
     v = func(v)
+    if v is None: continue
     d[k] = v
   return d
 
@@ -305,11 +305,18 @@ def list_switches (ofnexus = None):
   r = []
   for dpid,con in ofnexus._connections.iteritems():
     ports = []
-    for p in con.features.ports:
-      ports.append({
+    for p in con.ports.values():
+      pdict = {
         'port_no':p.port_no,
         'hw_addr':str(p.hw_addr),
-        'name':p.name})
+        'name':p.name}
+      for bit,name in of.ofp_port_config_map.items():
+        if p.config & bit:
+          pdict[name.split('OFPPC_', 1)[-1].lower()] = True
+      for bit,name in of.ofp_port_state_map.items():
+        if p.state & bit:
+          pdict[name.split('OFPPS_', 1)[-1].lower()] = True
+      ports.append(pdict)
     ports.sort(key=lambda item:item['port_no'])
 
     rr = {
@@ -320,4 +327,3 @@ def list_switches (ofnexus = None):
 
   r.sort(key=lambda item:item['dpid'])
   return r
-

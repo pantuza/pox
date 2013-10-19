@@ -13,9 +13,13 @@
 # limitations under the License.
 
 from pox.core import core
-import __main__
+import pox.boot
 
-log = core.getLogger("tests")
+if core is None:
+  import logging
+  log = logging.getLogger("tests")
+else:
+  log = core.getLogger("tests")
 
 _first = True
 _tests = []
@@ -24,12 +28,12 @@ def _up (e):
   log.info("Starting")
   for test in _tests:
     log.info("Test %s", test)
-    if __main__.doImport("tests." + test) is True:
+    if pox.boot._do_import("tests." + test) is True:
       log.error("Test %s not found", test)
       return
 
 def launch (**kw):
-  __main__.cli = False # Disable CLI
+  #__main__.cli = False # Disable CLI
   global _first
   if _first:
     core.addListenerByName("UpEvent", _up)
