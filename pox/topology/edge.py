@@ -10,8 +10,7 @@ class Edge (GraphEntity):
     else:
       return (link.entity2.id, link.entity1.id)
 
-  def __init__ (self, link):
+  def __init__ (self, link, weight=None):
     super(Edge, self).__init__(link)
     self.key = Edge._make_key(link)
-
-
+    self.weight = None
