@@ -17,8 +17,74 @@ class Graph (object):
     self.edges = {}
     self._subscribe()
 
-  def _subscribe (self):
-    """  """
+  def add_vertex (self, entity):
+    """
+    Add a new Graph Entity (Vertex) to the graph vertixes
+    """
+
+    if entity.id not in self.vertexes:
+      self.vertexes[entity.id] = Vertex(entity)
+  
+  def remove_vertex (self, entity):
+    """
+    Remove a Vertex from Vertexes and remove its edges
+    """
+    if entity.id in self.vertexes:
+      vertex = self.vertexes[entity.id]
+      for adj_vertex, links in vertex.adjacency.items():
+        for link in links:
+          self.remove_edge(link)
+      del self.vertexes[entity.id]
+  
+  def get_vertex (self, id=None):
+    """
+    Returns a vertex by its id
+    """
+    
+    try:
+      return self.vertexes[id]
+    except IndexError:
+      return None
+
+  def add_edge (self, link):
+    """
+    Add an Edge and insert each vertex of the Edge in the adjacency list 
+    of each other
+    """
+    
+    if link.id in self.edges:
+      raise Exception("Link ID %s already in graph" % str(link.id))
+
+    edge = Edge(link)
+    self.edges[link.id] = edge
+    v1 = self.get_vertex(link.entity1.id)
+    v2 = self.get_vertex(link.entity2.id)
+    
+    if v1 and v2:
+      v1.add_adjacency(v2, link)
+      v2.add_adjacency(v1, link)
+
+  def remove_edge (self, link):
+    """
+    Removes an Edge and its references inside adjacency list of vertexes 
+    """
+    
+    if link.id not in self.edges:
+      raise Exception("Link ID %s is not in graph" % str(link.id))
+
+    del self.edges[link.id]
+    v1 = self.get_vertex(link.entity1.id)
+    v2 = self.get_vertex(link.entity2.id)
+    
+    if v1 and v2:
+      v1.remove_adjacency(v2)
+      v2.remove_adjacency(v1)
+
+  def _subscribe(self):
+    """
+    Subscribe to POX Core events
+    """
+    
     if core.hasComponent("topology"):
       core.topology.addListenerByName("SwitchJoin", self._handle_SwitchJoin)
       core.topology.addListenerByName("SwitchLeave", self._handle_SwitchLeave)
@@ -57,7 +123,7 @@ class Graph (object):
   def _handle_HostLeave (self, event):
     """  """
     self.log.info("HostLeave event")
-    self.remove_vertex(event.host)
+    self.remove_vertex(event.host) 
 
   def _handle_EntityJoin (self, event):
     """  """
@@ -79,51 +145,6 @@ class Graph (object):
     self.log.info("LinkLeave fired")
     self.remove_edge(event.link)
 
-  def add_vertex (self, entity):
-    """  """
-    if entity.id not in self.vertexes:
-      self.vertexes[entity.id] = Vertex(entity)
-  
-  def remove_vertex (self, entity):
-    """  """
-    if entity.id in self.vertexes:
-      vertex = self.vertexes[entity.id]
-      for adj_vertex, links in vertex.adjacency.items():
-        for link in links:
-          remove_edge(link)
-      del self.vertexes[entity.id]
-  
-  def get_vertex (self, id=None):
-    """  """
-    try:
-      return self.vertexes[id]
-    except IndexError:
-      return None
-
-  def add_edge (self, link):
-    """  """
-    if link.id in self.edges:
-      raise Exception("Link ID %s already in graph" % str(link.id))
-
-    edge = Edge(link)
-    self.edges[link.id] = edge
-    v1 = self.get_vertex(link.entity1.id)
-    v2 = self.get_vertex(link.entity2.id)
-    if v1 and v2:
-      v1.add_adjacency(v2, link)
-      v2.add_adjacency(v1, link)
-
-  def remove_edge (self, link):
-    """  """
-    if link.id not in self.edges:
-      raise Exception("Link ID %s is not in graph" % str(link.id))
-
-    del self.edges[link.id]
-    v1 = self.get_vertex(link.entity1.id)
-    v2 = self.get_vertex(link.entity2.id)
-    if v1 and v2:
-      v1.remove_adjacency(v2)
-      v2.remove_adjacency(v1)
 
 
 def launch ():
