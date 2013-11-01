@@ -13,4 +13,4 @@ class Edge (GraphEntity):
   def __init__ (self, link, weight=None):
     super(Edge, self).__init__(link)
     self.key = Edge._make_key(link)
-    self.weight = None
+    self.weight = weight
