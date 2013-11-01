@@ -1,4 +1,4 @@
-# Copyright 2011-2012 Colin Scott
+# Copyright 2013 James McCauley
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,3 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Informational components
+
+This package contains components which are in some way informational.  This
+includes, for example, components which simply log extra information or are
+helpful for debugging.
+"""

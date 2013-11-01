@@ -2,7 +2,7 @@
 #
 # Copyright 2011-2012 Andreas Wundsam
 # Copyright 2011-2012 Colin Scott
-# Copyright 2011-2012 James McCauley
+# Copyright 2011-2013 James McCauley
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,11 +24,13 @@ from copy import copy
 sys.path.append(os.path.dirname(__file__) + "/../../..")
 
 from pox.openflow.libopenflow_01 import *
+from pox.openflow.flow_table import FlowTable
 from pox.datapaths.switch import *
 
 class MockConnection(object):
-  def __init__(self):
+  def __init__(self, do_packing):
     self.received = []
+    self.do_packing = do_packing
 
   @property
   def last(self):
@@ -42,17 +44,26 @@ class MockConnection(object):
 
   # from switch
   def send(self, msg):
+    if type(msg) is not bytes:
+      if self.do_packing and hasattr(msg, 'pack'):
+          dummy = msg.pack()
     self.received.append(msg)
 
-class SwitchImplTest(unittest.TestCase):
+
+class SwitchImplTest (unittest.TestCase):
+  _do_packing = False
 
   def setUp(self):
-    self.conn = MockConnection()
+    self.conn = MockConnection(self._do_packing)
     self.switch = SoftwareSwitch(1, name="sw1")
     self.switch.set_connection(self.conn)
-    self.packet = ethernet(src=EthAddr("00:00:00:00:00:01"), dst=EthAddr("00:00:00:00:00:02"),
-            payload=ipv4(srcip=IPAddr("1.2.3.4"), dstip=IPAddr("1.2.3.5"),
-                payload=udp(srcport=1234, dstport=53, payload="haha")))
+    self.packet = ethernet(
+        src=EthAddr("00:00:00:00:00:01"),
+        dst=EthAddr("00:00:00:00:00:02"),
+        payload=ipv4(srcip=IPAddr("1.2.3.4"),
+        dstip=IPAddr("1.2.3.5"),
+        payload=udp(srcport=1234, dstport=53, payload="haha")))
+
   def test_hello(self):
     c = self.conn
     c.to_switch(ofp_hello(xid=123))
@@ -71,14 +82,15 @@ class SwitchImplTest(unittest.TestCase):
     c = self.conn
     c.to_switch(ofp_barrier_request(xid=123))
     self.assertEqual(len(c.received), 1)
-    self.assertTrue(isinstance(c.last, ofp_barrier_reply) and c.last.xid == 123,
-          "should have received echo reply but got %s" % c.last)
-
+    self.assertTrue(isinstance(c.last, ofp_barrier_reply)
+        and c.last.xid == 123,
+        "should have received echo reply but got %s" % c.last)
 
   def test_flow_mod(self):
     c = self.conn
     s = self.switch
-    c.to_switch(ofp_flow_mod(xid=124, priority=1, match=ofp_match(in_port=1, nw_src="1.2.3.4")))
+    c.to_switch(ofp_flow_mod(xid=124, priority=1,
+        match=ofp_match(in_port=1, nw_src="1.2.3.4")))
     self.assertEqual(len(c.received), 0)
     self.assertEqual(len(s.table), 1)
     e = s.table.entries[0]
@@ -92,7 +104,8 @@ class SwitchImplTest(unittest.TestCase):
     s.addListener(DpPacketOut, lambda(event): received.append(event))
 
     packet = self.packet
-    c.to_switch(ofp_packet_out(data=packet, actions=[ofp_action_output(port=2)]))
+    c.to_switch(ofp_packet_out(data=packet,
+        actions=[ofp_action_output(port=2)]))
     self.assertEqual(len(c.received), 0)
     self.assertEqual(len(received), 1)
     event = received[0]
@@ -102,10 +115,11 @@ class SwitchImplTest(unittest.TestCase):
   def test_send_packet_in(self):
     c = self.conn
     s = self.switch
-    s.send_packet_in(in_port=1, buffer_id=123, packet=self.packet, reason=OFPR_NO_MATCH)
+    s.send_packet_in(in_port=1, buffer_id=123, packet=self.packet,
+        reason=OFPR_NO_MATCH)
     self.assertEqual(len(c.received), 1)
     self.assertTrue(isinstance(c.last, ofp_packet_in) and c.last.xid == 0,
-          "should have received packet_in but got %s" % c.last)
+        "should have received packet_in but got %s" % c.last)
     self.assertEqual(c.last.in_port,1)
     self.assertEqual(c.last.buffer_id,123)
     self.assertEqual(c.last.data, self.packet.pack())
@@ -119,7 +133,7 @@ class SwitchImplTest(unittest.TestCase):
     s.rx_packet(self.packet, in_port=1)
     self.assertEqual(len(c.received), 1)
     self.assertTrue(isinstance(c.last, ofp_packet_in),
-          "should have received packet_in but got %s" % c.last)
+        "should have received packet_in but got %s" % c.last)
     self.assertTrue(c.last.buffer_id > 0)
 
     # let's send a flow_mod with a buffer id
@@ -210,6 +224,106 @@ class SwitchImplTest(unittest.TestCase):
     c.to_switch(msg)
     self.assertEqual(len(c.received), 1)
     self.assertTrue(isinstance(c.last, ofp_port_status))
+
+
+# Do tests with packing independently to make it easier to spot
+# packing-related bugs.  (Maybe?)
+class PackingTest (SwitchImplTest):
+  _do_packing = True
+
+
+#class SwitchFlowTableTest(unittest.TestCase):
+class ProcessFlowModTest(unittest.TestCase):
+  _do_packing = False
+
+  def setUp(self):
+    self.conn = MockConnection(self._do_packing)
+    self.switch = SoftwareSwitch(1, name="sw1")
+    self.switch.set_connection(self.conn)
+    self.packet = ethernet(
+        src=EthAddr("00:00:00:00:00:01"),
+        dst=EthAddr("00:00:00:00:00:02"),
+        payload=ipv4(srcip=IPAddr("1.2.3.4"),
+        dstip=IPAddr("1.2.3.5"),
+        payload=udp(srcport=1234, dstport=53, payload="haha")))
+
+  def test_process_flow_mod_add(self):
+    """ test that simple insertion of a flow works"""
+    c = self.conn
+    s = self.switch
+    t = s.table
+
+    # test wrong port
+    msg = ofp_flow_mod(priority=5, cookie=0x31415926, actions=[ofp_action_output(port=5)])
+    c.to_switch(msg)
+
+    self.assertEqual(len(t.entries), 1)
+    e = t.entries[0]
+    self.assertEqual(e.priority, 5)
+    self.assertEqual(e.cookie, 0x31415926)
+    self.assertEqual(e.actions, [ ofp_action_output(port=5)])
+
+  def test_process_flow_mod_modify(self):
+    """ test that simple removal of a flow works"""
+    c = self.conn
+    s = self.switch
+
+    def table():
+      t = FlowTable()
+      t.add_entry(TableEntry(priority=6, cookie=0x1, match=ofp_match(dl_src=EthAddr("00:00:00:00:00:01"),nw_src="1.2.3.4"), actions=[ofp_action_output(port=5)]))
+      t.add_entry(TableEntry(priority=5, cookie=0x2, match=ofp_match(dl_src=EthAddr("00:00:00:00:00:02"), nw_src="1.2.3.0/24"), actions=[ofp_action_output(port=6)]))
+      t.add_entry(TableEntry(priority=1, cookie=0x3, match=ofp_match(), actions=[]))
+      return t
+
+    s.table = table()
+    t = s.table
+    msg = ofp_flow_mod(command = OFPFC_MODIFY, match=ofp_match(), actions = [ofp_action_output(port=1)])
+    c.to_switch(msg)
+    self.assertEquals([e.cookie for e in t.entries if e.actions == [ofp_action_output(port=1)] ], [1,2,3])
+    self.assertEquals(len(t.entries), 3)
+
+    s.table = table()
+    t = s.table
+    msg = ofp_flow_mod(command = OFPFC_MODIFY, match=ofp_match(nw_src="1.2.0.0/16"), actions = [ofp_action_output(port=8)])
+    c.to_switch(msg)
+    self.assertEquals([e.cookie for e in t.entries if e.actions == [ofp_action_output(port=8)] ], [1,2])
+    self.assertEquals(len(t.entries), 3)
+
+    # non-matching OFPFC_MODIFY acts as add
+    s.table = table()
+    t = s.table
+    msg = ofp_flow_mod(cookie=5, command = OFPFC_MODIFY, match=ofp_match(nw_src="2.2.0.0/16"), actions = [ofp_action_output(port=8)])
+    c.to_switch(msg)
+    self.assertEquals(len(t.entries), 4)
+    self.assertEquals([e.cookie for e in t.entries if e.actions == [ofp_action_output(port=8)] ], [5])
+
+  def test_process_flow_mod_modify_strict(self):
+    """ test that simple removal of a flow works"""
+    c = self.conn
+    s = self.switch
+
+    def table():
+      t = FlowTable()
+      t.add_entry(TableEntry(priority=6, cookie=0x1, match=ofp_match(dl_src=EthAddr("00:00:00:00:00:01"),nw_src="1.2.3.4"), actions=[ofp_action_output(port=5)]))
+      t.add_entry(TableEntry(priority=5, cookie=0x2, match=ofp_match(dl_src=EthAddr("00:00:00:00:00:02"), nw_src="1.2.3.0/24"), actions=[ofp_action_output(port=6)]))
+      t.add_entry(TableEntry(priority=1, cookie=0x3, match=ofp_match(), actions=[]))
+      return t
+
+    s.table = table()
+    t = s.table
+    msg = ofp_flow_mod(command = OFPFC_MODIFY_STRICT, priority=1, match=ofp_match(), actions = [ofp_action_output(port=1)])
+    c.to_switch(msg)
+    self.assertEquals([e.cookie for e in t.entries if e.actions == [ofp_action_output(port=1)] ], [3])
+    self.assertEquals(len(t.entries), 3)
+
+    s.table = table()
+    t = s.table
+    msg = ofp_flow_mod(command = OFPFC_MODIFY_STRICT, priority=5, match=ofp_match(dl_src=EthAddr("00:00:00:00:00:02"), nw_src="1.2.3.0/24"), actions = [ofp_action_output(port=8)])
+    c.to_switch(msg)
+    self.assertEquals([e.cookie for e in t.entries if e.actions == [ofp_action_output(port=8)] ], [2])
+    self.assertEquals(len(t.entries), 3)
+
+
 
 
 if __name__ == '__main__':

@@ -1,19 +1,16 @@
 # Copyright 2011,2012 James McCauley
 #
-# This file is part of POX.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at:
 #
-# POX is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# POX is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with POX.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 An ARP utility that can learn and proxy ARPs, and can also answer queries
@@ -21,6 +18,11 @@ from a list of static entries.
 
 This adds the "arp" object to the console, which you can use to look at
 or modify the ARP table.
+
+Add ARP entries on commandline like:
+  arp_responder --<IP>=<MAC> --<IP>=<MAC>
+
+Leave MAC unspecified if you want to use the switch MAC.
 """
 
 from pox.core import core
@@ -29,6 +31,7 @@ log = core.getLogger()
 
 from pox.lib.packet.ethernet import ethernet, ETHER_BROADCAST
 from pox.lib.packet.arp import arp
+from pox.lib.packet.vlan import vlan
 from pox.lib.addresses import IPAddr, EthAddr
 from pox.lib.util import dpid_to_str, str_to_bool
 from pox.lib.recoco import Timer
@@ -49,15 +52,22 @@ class Entry (object):
   We use the timeout so that if an entry is older than ARP_TIMEOUT, we
    flood the ARP request rather than try to answer it ourselves.
   """
-  def __init__ (self, mac, static = False):
+  def __init__ (self, mac, static = None, flood = None):
     self.timeout = time.time() + ARP_TIMEOUT
-    self.static = static
+    self.static = False
+    self.flood = True
     if mac is True:
-      # Means use switch's MAC, implies True
+      # Means use switch's MAC, implies static/noflood
       self.mac = True
       self.static = True
+      self.flood = False
     else:
       self.mac = EthAddr(mac)
+
+    if static is not None:
+      self.static = static
+    if flood is not None:
+      self.flood = flood
 
   def __eq__ (self, other):
     if isinstance(other, Entry):
@@ -177,8 +187,8 @@ class ARPResponder (object):
             # Learn or update port/MAC info
             if a.protosrc in _arp_table:
               if _arp_table[a.protosrc] != a.hwsrc:
-                log.warn("%s RE-learned %s: %s->%s", (dpid_to_str(dpid),
-                    a.protosrc, _arp_table[a.protosrc], a.hwsrc))
+                log.warn("%s RE-learned %s: %s->%s", dpid_to_str(dpid),
+                    a.protosrc, _arp_table[a.protosrc].mac, a.hwsrc)
             else:
               log.info("%s learned %s", dpid_to_str(dpid), a.protosrc)
             _arp_table[a.protosrc] = Entry(a.hwsrc)
@@ -206,6 +216,13 @@ class ARPResponder (object):
               e = ethernet(type=packet.type, src=_dpid_to_mac(dpid),
                             dst=a.hwsrc)
               e.payload = r
+              if packet.type == ethernet.VLAN_TYPE:
+                v_rcv = packet.find('vlan')
+                e.payload = vlan(eth_type = e.type,
+                                 payload = e.payload,
+                                 id = v_rcv.id,
+                                 pcp = v_rcv.pcp)
+                e.type = ethernet.VLAN_TYPE
               log.info("%s answering ARP for %s" % (dpid_to_str(dpid),
                 str(r.protosrc)))
               msg = of.ofp_packet_out()
@@ -220,21 +237,31 @@ class ARPResponder (object):
               squelch = a.protodst in _failed_queries
               _failed_queries[a.protodst] = time.time()
 
-    # Didn't know how to handle this ARP, so just flood it
-    msg = "%s flooding ARP %s %s => %s" % (dpid_to_str(dpid),
-        {arp.REQUEST:"request",arp.REPLY:"reply"}.get(a.opcode,
-        'op:%i' % (a.opcode,)), a.protosrc, a.protodst)
+    if self._check_for_flood(dpid, a):
+      # Didn't know how to handle this ARP, so just flood it
+      msg = "%s flooding ARP %s %s => %s" % (dpid_to_str(dpid),
+          {arp.REQUEST:"request",arp.REPLY:"reply"}.get(a.opcode,
+          'op:%i' % (a.opcode,)), a.protosrc, a.protodst)
 
-    if squelch:
-      log.debug(msg)
-    else:
-      log.info(msg)
+      if squelch:
+        log.debug(msg)
+      else:
+        log.info(msg)
 
-    msg = of.ofp_packet_out()
-    msg.actions.append(of.ofp_action_output(port = of.OFPP_FLOOD))
-    msg.data = event.ofp
-    event.connection.send(msg.pack())
+      msg = of.ofp_packet_out()
+      msg.actions.append(of.ofp_action_output(port = of.OFPP_FLOOD))
+      msg.data = event.ofp
+      event.connection.send(msg.pack())
+
     return EventHalt if _eat_packets else None
+
+  def _check_for_flood (self, dpid, a):
+    """
+    Return True if you want to flood this
+    """
+    if a.protodst in _arp_table:
+      return _arp_table[a.protodst].flood
+    return True
 
 
 _arp_table = ARPTable() # IPAddr -> Entry
@@ -255,4 +282,3 @@ def launch (timeout=ARP_TIMEOUT, no_flow=False, eat_packets=True,
   for k,v in kw.iteritems():
     _arp_table[IPAddr(k)] = Entry(v, static=True)
   core.registerNew(ARPResponder)
-

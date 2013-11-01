@@ -1,19 +1,16 @@
 # Copyright 2011,2012 James McCauley
 #
-# This file is part of POX.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at:
 #
-# POX is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# POX is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with POX.  If not, see <http://www.gnu.org/licenses/>.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """
 In charge of OpenFlow 1.0 switches.
@@ -24,6 +21,7 @@ NOTE: This module is loaded automatically on startup unless POX is run
 from pox.core import core
 import pox
 import pox.lib.util
+from pox.lib.addresses import EthAddr
 from pox.lib.revent.revent import EventMixin
 import datetime
 import time
@@ -59,7 +57,7 @@ import threading
 import os
 import sys
 import exceptions
-from errno import EAGAIN, ECONNRESET
+from errno import EAGAIN, ECONNRESET, EADDRINUSE, EADDRNOTAVAIL
 
 
 import traceback
@@ -78,7 +76,7 @@ def handle_ECHO_REPLY (con, msg):
 
 def handle_ECHO_REQUEST (con, msg): #S
   reply = msg
-  
+
   reply.header_type = of.OFPT_ECHO_REPLY
   con.send(reply)
 
@@ -279,15 +277,17 @@ class DeferredSender (threading.Thread):
   Class that handles sending when a socket write didn't complete
   """
   def __init__ (self):
-    # Threads, not recoco?
     threading.Thread.__init__(self)
+    core.addListeners(self)
     self._dataForConnection = {}
     self._lock = threading.RLock()
     self._waker = pox.lib.util.makePinger()
-    self.daemon = True
     self.sending = False
 
     self.start()
+
+  def _handle_GoingDownEvent (self, event):
+    self._waker.ping()
 
   def _sliceup (self, data):
     """
@@ -330,7 +330,7 @@ class DeferredSender (threading.Thread):
       with self._lock:
         cons = self._dataForConnection.keys()
 
-      rlist, wlist, elist = select.select([self._waker], cons, cons, 1)
+      rlist, wlist, elist = select.select([self._waker], cons, cons, 5)
       if not core.running: break
 
       with self._lock:
@@ -376,9 +376,6 @@ class DeferredSender (threading.Thread):
               del self._dataForConnection[con]
             except:
               pass
-
-# Used by the Connection class below
-deferredSender = DeferredSender()
 
 class DummyOFNexus (object):
   def raiseEventNoErrors (self, event, *args, **kw):
@@ -508,7 +505,7 @@ class PortCollection (object):
         if p.hw_addr == index:
           return p
     else:
-      for p in self.port:
+      for p in self._ports:
         if p.name == index:
           return p
     if self._chain:
@@ -588,7 +585,7 @@ class Connection (EventMixin):
     QueueStatsReceived,
     FlowRemoved,
   ])
-  
+
   # Globally unique identifier for the Connection instance
   ID = 0
 
@@ -616,6 +613,7 @@ class Connection (EventMixin):
     self.dpid = None
     self.features = None
     self.disconnected = False
+    self.disconnection_raised = False
     self.connect_time = None
     self.idle_time = time.time()
 
@@ -628,6 +626,13 @@ class Connection (EventMixin):
     #TODO: set a time that makes sure we actually establish a connection by
     #      some timeout
 
+  @property
+  def eth_addr (self):
+    dpid = self.dpid
+    if self.dpid is None:
+      raise RuntimeError("eth_addr not available")
+    return EthAddr("%012x" % (dpid & 0xffFFffFFffFF,))
+
   def fileno (self):
     return self.sock.fileno()
 
@@ -638,23 +643,23 @@ class Connection (EventMixin):
     except:
       pass
 
-  def disconnect (self, msg = 'disconnected'):
+  def disconnect (self, msg = 'disconnected', defer_event = False):
     """
     disconnect this Connection (usually not invoked manually).
     """
-    already = False
     if self.disconnected:
       self.msg("already disconnected")
-      already = True
     self.info(msg)
     self.disconnected = True
     try:
       self.ofnexus._disconnect(self.dpid)
     except:
       pass
-    if self.dpid is not None and not already:
-      self.ofnexus.raiseEventNoErrors(ConnectionDown, self)
-      self.raiseEventNoErrors(ConnectionDown, self)
+    if self.dpid is not None:
+      if not self.disconnection_raised and not defer_event:
+        self.disconnection_raised = True
+        self.ofnexus.raiseEventNoErrors(ConnectionDown, self)
+        self.raiseEventNoErrors(ConnectionDown, self)
 
     try:
       #deferredSender.kill(self)
@@ -703,7 +708,7 @@ class Connection (EventMixin):
         deferredSender.send(self, data)
       else:
         self.msg("Socket error: " + strerror)
-        self.disconnect()
+        self.disconnect(defer_event=True)
 
   def read (self):
     """
@@ -712,7 +717,10 @@ class Connection (EventMixin):
 
     Note: This function will block if data is not available.
     """
-    d = self.sock.recv(2048)
+    try:
+      d = self.sock.recv(2048)
+    except:
+      return False
     if len(d) == 0:
       return False
     self.buf += d
@@ -768,7 +776,7 @@ class Connection (EventMixin):
                   str(ofp.type))
         self._previous_stats = []
         return
-      
+
     if len(self._previous_stats) != 0:
       if ((ofp.xid == self._previous_stats[0].xid) and
           (ofp.type == self._previous_stats[0].type)):
@@ -827,11 +835,18 @@ class OpenFlow_01_Task (Task):
     Task.__init__(self)
     self.port = int(port)
     self.address = address
+    self.started = False
 
     core.addListener(pox.core.GoingUpEvent, self._handle_GoingUpEvent)
 
   def _handle_GoingUpEvent (self, event):
     self.start()
+
+  def start (self):
+    if self.started:
+      return
+    self.started = True
+    return super(OpenFlow_01_Task,self).start()
 
   def run (self):
     # List of open sockets/connections to select on
@@ -839,7 +854,19 @@ class OpenFlow_01_Task (Task):
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind((self.address, self.port))
+    try:
+      listener.bind((self.address, self.port))
+    except socket.error as (errno, strerror):
+      log.error("Error %i while binding socket: %s", errno, strerror)
+      if errno == EADDRNOTAVAIL:
+        log.error(" You may be specifying a local address which is "
+                  "not assigned to any interface.")
+      elif errno == EADDRINUSE:
+        log.error(" You may have another controller running.")
+        log.error(" Use openflow.of_01 --port=<port> to run POX on "
+                  "another port.")
+      return
+
     listener.listen(16)
     sockets.append(listener)
 
@@ -922,10 +949,19 @@ def _set_handlers ():
 _set_handlers()
 
 
+# Used by the Connection class
+deferredSender = None
+
 def launch (port = 6633, address = "0.0.0.0"):
   if core.hasComponent('of_01'):
     return None
+
+  global deferredSender
+  deferredSender = DeferredSender()
+
+  if of._logger is None:
+    of._logger = core.getLogger('libopenflow_01')
+
   l = OpenFlow_01_Task(port = int(port), address = address)
   core.register("of_01", l)
   return l
-

@@ -1,4 +1,4 @@
-# Copyright 2012 James McCauley
+# Copyright 2012,2013 James McCauley
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,7 +18,8 @@
 from pox.core import core
 from pox.lib.util import initHelper
 from pox.lib.util import hexdump
-from pox.lib.addresses import parse_cidr, IPAddr, EthAddr
+from pox.lib.addresses import parse_cidr, IPAddr, EthAddr, IPAddr6
+import pox.lib.packet as pkt
 
 import pox.openflow.libopenflow_01 as of
 from pox.openflow.libopenflow_01 import ofp_header, ofp_vendor_base
@@ -27,6 +28,20 @@ from pox.openflow.libopenflow_01 import _unpack, _read, _skip
 
 import struct
 
+
+# -----------------------------------------------------------------------
+# OpenFlow Stuff
+# -----------------------------------------------------------------------
+# Technically, this stuff is part of OpenFlow 1.1+ and shouldn't be in
+# this file.  Since we don't have 1.1+ support yet, it's here at least
+# temporarily.
+OFPR_INVALID_TTL = 2 # Packet has invalid TTL
+OFPC_INVALID_TTL_TO_CONTROLLER = 4
+
+
+# -----------------------------------------------------------------------
+# Nicira extensions
+# -----------------------------------------------------------------------
 
 NX_VENDOR_ID = 0x00002320
 
@@ -54,6 +69,14 @@ def _init_constants ():
     "NXAST_FIN_TIMEOUT",
     "NXAST_CONTROLLER",
     "NXAST_DEC_TTL_CNT_IDS",
+    "NXAST_WRITE_METADATA",
+    "NXAST_PUSH_MPLS",
+    "NXAST_POP_MPLS",
+    "NXAST_SET_MPLS_TTL",
+    "NXAST_DEC_MPLS_TTL",
+    "NXAST_STACK_PUSH",
+    "NXAST_STACK_POP",
+    "NXAST_SAMPLE",
   ]
   for i,name in enumerate(actions):
     globals()[name] = i
@@ -66,15 +89,19 @@ NXT_SET_FLOW_FORMAT = 12
 NXT_FLOW_MOD = 13
 NXT_FLOW_MOD_TABLE_ID = 15
 NXT_SET_PACKET_IN_FORMAT = 16
+NXT_PACKET_IN = 17
 NXT_FLOW_AGE = 18
+NXT_SET_ASYNC_CONFIG = 19
 NXT_SET_CONTROLLER_ID = 20
 NXT_FLOW_MONITOR_CANCEL = 21
 NXT_FLOW_MONITOR_PAUSED = 22
 NXT_FLOW_MONITOR_RESUMED = 23
+
 NXST_FLOW_MONITOR_REQUEST = 2
 NXST_FLOW_MONITOR_REPLY = 2
 
 
+#TODO: Replace with version in pox.lib?
 def _issubclass (a, b):
   try:
     return issubclass(a, b)
@@ -173,7 +200,7 @@ class nicira_base (ofp_vendor_base):
     outstr += prefix + 'header: \n'
     outstr += ofp_vendor_base.show(self, prefix + '  ')
     outstr += prefix + 'vendor: ' + str(self.vendor) + '\n'
-    outstr += prefix + 'subtype: ' + len(self.subtype) + '\n'
+    outstr += prefix + 'subtype: ' + str(self.subtype) + '\n'
     outstr += self._show(prefix)
     return outstr
 
@@ -212,7 +239,7 @@ class nx_flow_mod_table_id (nicira_base):
 
     Return new offset
     """
-    offset,enable = of._unpack("!B", raw, offset)
+    offset,(enable,) = of._unpack("!B", raw, offset)
     offset = of._skip(raw, offset, 7)
     self.enable = True if enable else False
     return offset
@@ -238,80 +265,37 @@ class ofp_flow_mod_table_id (of.ofp_flow_mod):
 
   This is for use with the NXT_FLOW_MOD_TABLE_ID extension.
   """
-  #TODO: It'd be nice if this were a cleaner subclass of the original,
-  #      but it didn't really lend itself to subclassing.
   def __init__ (self, **kw):
     self.table_id = 0xff
     of.ofp_flow_mod.__init__(self, **kw)
 
-  @property
-  def _command (self):
-    return chr(self.table_id) + chr(self.command)
+  def splice_table_id (func):
+    """
+    Execute wrapped function with table_id temporarily stored as
+    MSB of command field.
+    """
+    def splice(self, *args):
+      assert self.command <= 0xff
+      self.command |= self.table_id << 8
+      try:
+        retval = func(self, *args)
+      finally:
+        self.table_id = self.command >> 8
+        self.command &= 0xff
+      return retval
+    return splice
 
-  @_command.setter
-  def _command (self, v):
-    self.table_id = ord(v[0])
-    self.command = ord(v[1])
-
-  # Unfortunately, there's no clean way to reuse a lot of the superclass,
-  # so we copy and paste...  Gross.
-  # (Might be worth tweaking the superclass to make this cleaner.)
+  @splice_table_id
   def pack (self):
-    """
-    Packs this object into its wire format.
-    May normalize fields.
-    NOTE: If "data" has been specified, this method may actually return
-          *more than just a single ofp_flow_mod* in packed form.
-          Specifically, it may also have a barrier and an ofp_packet_out.
-    """
-    po = None
-    if self.data:
-      #TODO: It'd be nice to log and then ignore if not data_is_complete.
-      #      Unfortunately, we currently have no logging in here, so we
-      #      assert instead which is a either too drastic or too quiet.
-      assert self.data.is_complete
-      assert self.buffer_id is None
-      self.buffer_id = self.data.buffer_id
-      if self.buffer_id is None:
-        po = ofp_packet_out(data=self.data)
-        po.in_port = self.data.in_port
-        po.actions.append(ofp_action_output(port = OFPP_TABLE))
-        # Should maybe check that packet hits the new entry...
-        # Or just duplicate the actions? (I think that's the best idea)
+    return super(ofp_flow_mod_table_id, self).pack()
 
-    assert self._assert()
-    packed = b""
-    packed += ofp_header.pack(self)
-    packed += self.match.pack(flow_mod=True)
-    packed += struct.pack("!QHHHHLHH", self.cookie, self._command,
-                          self.idle_timeout, self.hard_timeout,
-                          self.priority, self._buffer_id, self.out_port,
-                          self.flags)
-    for i in self.actions:
-      packed += i.pack()
-
-    if po:
-      packed += ofp_barrier_request().pack()
-      packed += po.pack()
-    return packed
-
+  @splice_table_id
   def unpack (self, raw, offset=0):
-    offset,length = self._unpack_header(raw, offset)
-    offset = self.match.unpack(raw, offset, flow_mod=True)
-    offset,(self.cookie, self._command, self.idle_timeout,
-            self.hard_timeout, self.priority, self._buffer_id,
-            self.out_port, self.flags) = \
-            _unpack("!QHHHHLHH", raw, offset)
-    offset,self.actions = _unpack_actions(raw,
-        length-(32 + len(self.match)), offset)
-    assert length == len(self)
-    return offset,length
+    return super(ofp_flow_mod_table_id, self).unpack()
 
+  @splice_table_id
   def __eq__ (self, other):
-    r = of.ofp_flow_mod(self, other)
-    if r:
-      if self.table_id != other.table_id: return False
-    return True
+    return super(ofp_flow_mod_table_id, self).__eq__(other)
 
   def show (self, prefix=''):
     outstr = ''
@@ -461,7 +445,7 @@ class nx_packet_in_format (nicira_base):
     """
     Pack body.
     """
-    return struct.pack("!L", self.format)
+    return struct.pack("!I", self.format)
 
   def _unpack_body (self, raw, offset, avail):
     """
@@ -469,7 +453,7 @@ class nx_packet_in_format (nicira_base):
 
     Return new offset
     """
-    offset,self.format = of._unpack("!L", raw, offset)
+    offset,(self.format,) = of._unpack("!I", raw, offset)
     return offset
 
   def _show (self, prefix):
@@ -485,6 +469,80 @@ class nx_packet_in_format (nicira_base):
       s += str(self.format)
     return s + "\n"
 
+
+NX_ROLE_OTHER = 0
+NX_ROLE_MASTER = 1
+NX_ROLE_SLAVE = 2
+
+class nx_role_request (nicira_base):
+  """
+  Requests master/slave/other role type
+
+  Can initialize with role=NX_ROLE_x or with, e.g., master=True.
+  """
+  subtype = NXT_ROLE_REQUEST
+  _MIN_LENGTH = 16 + 4
+
+  def _init (self, kw):
+    self.role = NX_ROLE_OTHER
+
+    if kw.pop("other", False):
+      self.role = NX_ROLE_OTHER
+    if kw.pop("master", False):
+      self.role = NX_ROLE_MASTER
+    if kw.pop("slave", False):
+      self.role = NX_ROLE_SLAVE
+
+  @property
+  def master (self):
+    return self.role == NX_ROLE_MASTER
+  @property
+  def slave (self):
+    return self.role == NX_ROLE_SLAVE
+  @property
+  def other (self):
+    return self.role == NX_ROLE_OTHER
+
+  def _eq (self, other):
+    """
+    Return True if equal
+
+    Overide this.
+    """
+    return self.role == other.role
+
+  def _pack_body (self):
+    """
+    Pack body.
+    """
+    return struct.pack("!I", self.role)
+
+  def _unpack_body (self, raw, offset, avail):
+    """
+    Unpack body in raw starting at offset.
+
+    Return new offset
+    """
+    offset,(self.role,) = of._unpack("!I", raw, offset)
+    return offset
+
+  def _show (self, prefix):
+    """
+    Format additional fields as text
+    """
+    s = prefix + "role: "
+    s += {NX_ROLE_OTHER:"other",NX_ROLE_MASTER:"master",
+        NX_ROLE_SLAVE:"slave"}.get(self.role, str(self.role))
+    return s + "\n"
+
+class nx_role_reply (nx_role_request):
+  subtype = NXT_ROLE_REPLY
+  pass
+
+
+# -----------------------------------------------------------------------
+# Actions
+# -----------------------------------------------------------------------
 
 class nx_output_reg (of.ofp_action_vendor_base):
   def _init (self, kw):
@@ -561,6 +619,11 @@ class nx_reg_move (of.ofp_action_vendor_base):
     return True
 
   def _pack_body (self):
+    if self.nbits is None:
+      a = self.dst._get_size_hint() - self.dst_ofs
+      b = self.src._get_size_hint() - self.src_ofs
+      self.nbits = min(a,b)
+
     o = self.dst()
     o._force_mask = False
     dst = o.pack(omittable=False, header_only=True)
@@ -569,7 +632,7 @@ class nx_reg_move (of.ofp_action_vendor_base):
     o._force_mask = False
     src = o.pack(omittable=False, header_only=True)
 
-    p = struct.pack('!HHHH4s4s', self.subtype, self.nbits, self.src_ofs, 
+    p = struct.pack('!HHHH4s4s', self.subtype, self.nbits, self.src_ofs,
             self.dst_ofs, src, dst)
     return p
 
@@ -616,6 +679,8 @@ class nx_reg_load (of.ofp_action_vendor_base):
     return True
 
   def _pack_body (self):
+    if self.nbits is None:
+      self.nbits = self.dst._get_size_hint() - self.offset
     nbits = self.nbits - 1
     assert nbits >= 0 and nbits <= 63
     assert self.offset >= 0 and self.offset < (1 << 10)
@@ -652,23 +717,37 @@ class nx_reg_load (of.ofp_action_vendor_base):
     return s
 
 
-class nx_action_dec_ttl (of.ofp_action_vendor_base):
+class nx_action_controller (of.ofp_action_vendor_base):
+  """
+  Sends packet to controller
+
+  This is similar to an output to OFPP_CONTROLLER, but allows setting
+  the reason field and controller id to send to.
+  """
   def _init (self, kw):
     self.vendor = NX_VENDOR_ID
-    self.subtype = NXAST_DEC_TTL
+    self.subtype = NXAST_CONTROLLER
+    self.max_len = 0xffFF
+    self.controller_id = 0
+    self.reason = of.OFPR_ACTION
 
   def _eq (self, other):
     if self.subtype != other.subtype: return False
+    if self.max_len != other.max_len: return False
+    if self.controller_id != other.controller_id: return False
+    if self.reason != other.reason: return False
     return True
 
   def _pack_body (self):
-    p = struct.pack('!H', self.subtype)
-    p += of._PAD6
+    p = struct.pack('!HHHB', self.subtype, self.max_len, self.controller_id,
+        self.reason)
+    p += of._PAD
     return p
 
   def _unpack_body (self, raw, offset, avail):
-    offset,(self.subtype,) = of._unpack('!H', raw, offset)
-    offset = of._skip(raw, offset, 6)
+    offset,(self.subtype,self.max_len, self.controller_id, self.reason) = \
+        of._unpack('!HHHB', raw, offset)
+    offset = of._skip(raw, offset, 1)
     return offset
 
   def _body_length (self):
@@ -677,6 +756,77 @@ class nx_action_dec_ttl (of.ofp_action_vendor_base):
   def _show (self, prefix):
     s = ''
     s += prefix + ('subtype: %s\n' % (self.subtype,))
+    s += prefix + ('max_len: %s\n' % (self.max_len,))
+    s += prefix + ('controller_id: %s\n' % (self.controller_id,))
+    s += prefix + ('reason: %s\n' % (self.reason,))
+    return s
+
+
+class nx_action_push_mpls (of.ofp_action_vendor_base):
+  """
+  Push an MPLS label
+
+  """
+  def _init (self, kw):
+    self.vendor = NX_VENDOR_ID
+    self.subtype = NXAST_PUSH_MPLS
+    self.ethertype = pkt.ethernet.MPLS_TYPE
+    # The only alternative for ethertype is MPLS_MC_TYPE (multicast)
+
+  def _eq (self, other):
+    if self.subtype != other.subtype: return False
+    if self.ethertype != other.ethertype: return False
+    return True
+
+  def _pack_body (self):
+    p = struct.pack('!HHI', self.subtype, self.ethertype, 0) # 4 bytes pad
+    return p
+
+  def _unpack_body (self, raw, offset, avail):
+    offset,(self.subtype,self.ethertype) = of._unpack('!HH', raw, offset)
+    offset = of._skip(raw, offset, 4)
+    return offset
+
+  def _body_length (self):
+    return 8
+
+  def _show (self, prefix):
+    s = ''
+    s += prefix + ('subtype: %s\n' % (self.subtype,))
+    s += prefix + ('ethertype: %s\n' % (self.ethertype,))
+    return s
+
+
+class nx_action_pop_mpls (of.ofp_action_vendor_base):
+  """
+  Pop an MPLS label
+  """
+  def _init (self, kw):
+    self.vendor = NX_VENDOR_ID
+    self.subtype = NXAST_POP_MPLS
+    self.ethertype = None # Purposely bad
+
+  def _eq (self, other):
+    if self.subtype != other.subtype: return False
+    if self.ethertype != other.ethertype: return False
+    return True
+
+  def _pack_body (self):
+    p = struct.pack('!HHI', self.subtype, self.ethertype, 0) # 4 bytes pad
+    return p
+
+  def _unpack_body (self, raw, offset, avail):
+    offset,(self.subtype,self.ethertype) = of._unpack('!HH', raw, offset)
+    offset = of._skip(raw, offset, 4)
+    return offset
+
+  def _body_length (self):
+    return 8
+
+  def _show (self, prefix):
+    s = ''
+    s += prefix + ('subtype: %s\n' % (self.subtype,))
+    s += prefix + ('ethertype: %s\n' % (self.ethertype,))
     return s
 
 
@@ -726,6 +876,78 @@ class nx_action_resubmit (of.ofp_action_vendor_base):
     s += prefix + ('subtype: %s\n' % (self.subtype,))
     s += prefix + ('in_port: %s\n' % (self.in_port,))
     s += prefix + ('table: %s\n' % (self.table,))
+    return s
+
+
+class nx_action_set_tunnel (of.ofp_action_vendor_base):
+  """
+  Set a 32-bit tunnel ID
+
+  See also: nx_action_set_tunnel64
+  """
+  def _init (self, kw):
+    self.vendor = NX_VENDOR_ID
+    self.subtype = NXAST_SET_TUNNEL
+    self.tun_id = None # Must set
+
+  def _eq (self, other):
+    if self.subtype != other.subtype: return False
+    if self.tun_id != other.tun_id: return False
+    return True
+
+  def _pack_body (self):
+    p = struct.pack('!HHI', self.subtype, 0, self.tun_id)
+    return p
+
+  def _unpack_body (self, raw, offset, avail):
+    offset,(self.subtype,) = of._unpack('!H', raw, offset)
+    offset = of._skip(raw, offset, 2)
+    offset,(self.tun_id,) = of._unpack('!I', raw, offset)
+    return offset
+
+  def _body_length (self):
+    return 8
+
+  def _show (self, prefix):
+    s = ''
+    s += prefix + ('subtype: %s\n' % (self.subtype,))
+    s += prefix + ('tub_id: %s\n' % (self.tun_id,))
+    return s
+
+
+class nx_action_set_tunnel64 (of.ofp_action_vendor_base):
+  """
+  Set a 64-bit tunnel ID
+
+  See also: nx_action_set_tunnel
+  """
+  def _init (self, kw):
+    self.vendor = NX_VENDOR_ID
+    self.subtype = NXAST_SET_TUNNEL64
+    self.tun_id = None # Must set
+
+  def _eq (self, other):
+    if self.subtype != other.subtype: return False
+    if self.tun_id != other.tun_id: return False
+    return True
+
+  def _pack_body (self):
+    p = struct.pack('!HHIQ', self.subtype, 0, 0, self.tun_id)
+    return p
+
+  def _unpack_body (self, raw, offset, avail):
+    offset,(self.subtype,) = of._unpack('!H', raw, offset)
+    offset = of._skip(raw, offset, 6)
+    offset,(self.tun_id,) = of._unpack('!Q', raw, offset)
+    return offset
+
+  def _body_length (self):
+    return 16
+
+  def _show (self, prefix):
+    s = ''
+    s += prefix + ('subtype: %s\n' % (self.subtype,))
+    s += prefix + ('tub_id: %s\n' % (self.tun_id,))
     return s
 
 
@@ -793,6 +1015,489 @@ class nx_action_exit (of.ofp_action_vendor_base):
     return s
 
 
+class nx_action_dec_ttl (of.ofp_action_vendor_base):
+  def _init (self, kw):
+    self.vendor = NX_VENDOR_ID
+    self.subtype = NXAST_DEC_TTL
+
+  def _eq (self, other):
+    if self.subtype != other.subtype: return False
+    return True
+
+  def _pack_body (self):
+    p = struct.pack('!H', self.subtype)
+    p += of._PAD6
+    return p
+
+  def _unpack_body (self, raw, offset, avail):
+    offset,(self.subtype,) = of._unpack('!H', raw, offset)
+    offset = of._skip(raw, offset, 6)
+    return offset
+
+  def _body_length (self):
+    return 8
+
+  def _show (self, prefix):
+    s = ''
+    s += prefix + ('subtype: %s\n' % (self.subtype,))
+    return s
+
+
+# -----------------------------------------------------------------------
+# Learn action
+# -----------------------------------------------------------------------
+
+class nx_action_learn (of.ofp_action_vendor_base):
+  """
+  Allows table entries to add table entries
+
+  There are different ways of adding flow_mod_specs.  For example, the
+  following are all equivalent:
+
+  learn = nx.nx_action_learn(table_id=1,hard_timeout=10)
+  fms = nx.flow_mod_spec.new # Just abbreviating this
+  learn.spec.append(fms( field=nx.NXM_OF_VLAN_TCI, n_bits=12 ))
+  learn.spec.append(fms( field=nx.NXM_OF_ETH_SRC, match=nx.NXM_OF_ETH_DST ))
+  learn.spec.append(fms( field=nx.NXM_OF_IN_PORT, output=True ))
+
+  learn = nx.nx_action_learn(table_id=1,hard_timeout=10)
+  learn.spec.chain(
+      field=nx.NXM_OF_VLAN_TCI, n_bits=12).chain(
+      field=nx.NXM_OF_ETH_SRC, match=nx.NXM_OF_ETH_DST).chain(
+      field=nx.NXM_OF_IN_PORT, output=True)
+
+  learn = nx.nx_action_learn(table_id=1,hard_timeout=10)
+  learn.spec = [
+      nx.flow_mod_spec(src=nx.nx_learn_src_field(nx.NXM_OF_VLAN_TCI),
+                        n_bits=12),
+      nx.flow_mod_spec(src=nx.nx_learn_src_field(nx.NXM_OF_ETH_SRC),
+                        dst=nx.nx_learn_dst_match(nx.NXM_OF_ETH_DST)),
+      nx.flow_mod_spec(src=nx.nx_learn_src_field(nx.NXM_OF_IN_PORT),
+                        dst=nx.nx_learn_dst_output())
+  ]
+
+  """
+
+  def _init (self, kw):
+    self.vendor = NX_VENDOR_ID
+    self.subtype = NXAST_LEARN
+
+    self.idle_timeout = 0
+    self.hard_timeout = 0
+    self.priority = of.OFP_DEFAULT_PRIORITY
+    self.cookie = 0
+    self.flags = 0
+    self.table_id = 0
+    self.fin_idle_timeout = 0
+    self.fin_hard_timeout = 0
+
+    self.spec = flow_mod_spec_chain()
+
+  @property
+  def table (self):
+    """
+    Synonym for table_id
+    """
+    return self.table_id
+  @table.setter
+  def table (self, value):
+    self.table_id = value
+
+  def _eq (self, other):
+    if self.subtype != other.subtype: return False
+    if self.idle_timeout != other.idle_timeout: return False
+    if self.hard_timeout != other.hard_timeout: return False
+    if self.priority != other.priority: return False
+    if self.cookie != other.cookie: return False
+    if self.flags != other.flags: return False
+    if self.table_id != other.table_id: return False
+    if self.fin_idle_timeout != other.fin_idle_timeout: return False
+    if self.fin_hard_timeout != other.fin_hard_timeout: return False
+    return True
+
+  def _pack_body (self):
+    p = struct.pack('!HHHHQHBBHH',
+                    self.subtype,
+                    self.idle_timeout,
+                    self.hard_timeout,
+                    self.priority,
+                    self.cookie,
+                    self.flags,
+                    self.table_id,
+                    0,
+                    self.fin_idle_timeout,
+                    self.fin_hard_timeout)
+    for fs in self.spec:
+      p += fs.pack()
+    if len(p) % 8:
+      p += '\x00' * (8-(len(p)%8))
+    return p
+
+  def _unpack_body (self, raw, offset, avail):
+    orig_offset = offset
+    offset,(self.subtype, self.idle_timeout, self.hard_timeout,
+            self.priority, self.cookie, self.flags, self.table_id, _,
+            self.fin_idle_timeout,
+            self.fin_hard_timeout) = of._unpack('!HHHHQHBBHH', raw, offset)
+    avail -= (2+2+2+2+8+2+1+1+2+2)
+    assert (avail & 1) == 0
+    while avail > 0:
+      newoff, fms = flow_mod_spec.unpack_new(raw, offset)
+      if fms is None: break
+      self.spec.append(fms)
+      avail -= (newoff - offset)
+      offset = newoff
+    length = offset - orig_offset
+    if length % 8:
+      offset = of._skip(raw, offset, 8 - (length%8))
+    return offset
+
+  def _show (self, prefix):
+    s = ''
+    ff = ('idle_timeout hard_timeout priority cookie flags table_id '
+         'fin_idle_timeout fin_hard_timeout').split()
+    for f in ff:
+      s += prefix
+      s += f + ": "
+      s += str(getattr(self, f))
+      s += "\n"
+    return s
+
+
+NX_LEARN_SRC_FIELD     = 0
+NX_LEARN_SRC_IMMEDIATE = 1
+
+NX_LEARN_DST_MATCH     = 0
+NX_LEARN_DST_LOAD      = 1
+NX_LEARN_DST_OUTPUT    = 2
+
+class nx_learn_spec (object):
+  _is_src = False
+  _is_dst = False
+  data = None
+  n_bits = None
+  value = None
+
+  def pack (self):
+    return self.data if self.data else b''
+
+  @classmethod
+  def unpack_subclass (cls, spec, n_bits, raw, offset):
+    """
+    Returns (new_offset, object)
+    """
+    assert cls is not nx_learn_spec, "Must call on subclass"
+    c = _flow_mod_spec_to_class(cls._is_src, spec)
+    offset,o = c.unpack_new(n_bits, raw, offset)
+    return offset, o
+
+  @classmethod
+  def unpack_new (cls, n_bits, raw, offset):
+    """
+    Returns (new_offset, object)
+    """
+    o = cls.__new__(cls)
+    o.n_bits = n_bits
+    datalen = len(o)
+    if datalen != 0:
+      offset,o.data = of._read(raw, offset, datalen)
+    return offset,o
+
+  def __len__ (self):
+    # Implement.  Can't use .data field.
+    assert False, "__len__ unimplemented in " + type(self).__name__
+
+  def __repr__ (self):
+    return "<%s n_bits:%s>" % (type(self).__name__, self.n_bits)
+
+
+class nx_learn_spec_src (nx_learn_spec):
+  _is_src = True
+
+class nx_learn_spec_dst (nx_learn_spec):
+  _is_dst = True
+
+
+class _field_and_match (object):
+  """
+  Common functionality for src_field and dst_match
+  """
+  def __init__ (self, field, ofs = 0, n_bits = None):
+    #if type(field) is type: field = field()
+    data = field().pack(omittable = False, header_only = True)
+    data += struct.pack("!H", ofs)
+    if n_bits is None:
+      n_bits = field._get_size_hint() - ofs
+    elif n_bits < 0:
+      n_bits = field._get_size_hint() - ofs - n_bits
+    self.n_bits = n_bits
+    self.data = data
+
+  @property
+  def ofs (self):
+    return struct.unpack_from("!H", self.data, 4)[0]
+
+  @property
+  def field (self):
+    t,_,_ = nxm_entry.unpack_header(self.data, 0)
+    c = _nxm_type_to_class.get(t)
+    if c is None:
+      attrs = {'_nxm_type':t}
+      attrs['_nxm_length'] = length/2 if has_mask else length
+      c = type('nxm_type_'+str(t), (NXM_GENERIC,), attrs)
+    return c
+
+  def __len__ (self):
+    return 6
+
+
+class nx_learn_src_field (_field_and_match, nx_learn_spec_src):
+  value = NX_LEARN_SRC_FIELD
+
+  @property
+  def matching (self):
+    """
+    Returns a corresponding nx_learn_dst_match
+    """
+    return nx_learn_dst_match(self.field, self.ofs, self.n_bits)
+
+
+class nx_learn_src_immediate (nx_learn_spec_src):
+  """
+  An immediate value for a flow spec
+
+  Probably generally a good idea to use one of the factory methods, e.g., u8().
+  """
+  value = NX_LEARN_SRC_IMMEDIATE
+
+  def __init__ (self, data, n_bits = None):
+    if n_bits is None:
+      assert (len(data)&1) == 0, "data needs pad; n_bits cannot be inferred"
+      n_bits = len(data)*8
+    else:
+      assert len(data)*8 >= n_bits, "n_bits larger than data"
+    self.n_bits = n_bits
+    self.data = data
+
+  @classmethod
+  def u8 (cls, dst, value):
+    return cls(struct.pack("!H", value))
+
+  @classmethod
+  def u16 (cls, dst, value):
+    return cls(struct.pack("!H", value))
+
+  @classmethod
+  def u32 (cls, dst, value):
+    return cls(struct.pack("!L", value))
+
+  def __len__ (self):
+    return ((self.n_bits+15) // 16) * 2
+
+
+class nx_learn_dst_match (_field_and_match, nx_learn_spec_dst):
+  value = NX_LEARN_DST_MATCH
+
+
+class nx_learn_dst_load (nx_learn_spec_dst):
+  value = NX_LEARN_DST_LOAD
+
+  def __init__ (self, field, ofs = 0, n_bits = None):
+    data = field().pack(omittable = False, header_only = True)
+    data += struct.pack("!H", ofs)
+    if n_bits is None:
+      n_bits = field._get_size_hint() - ofs
+    elif n_bits < 0:
+      n_bits = field._get_size_hint() - ofs - n_bits
+    self.n_bits = n_bits
+    self.data = data
+
+  def __len__ (self):
+    return ((self.n_bits+15) // 16) * 2
+
+
+class nx_learn_dst_output (nx_learn_spec_dst):
+  value = NX_LEARN_DST_OUTPUT
+
+  def __init__ (self, dummy = True):
+    assert dummy is True
+    super(nx_learn_dst_output,self).__init__()
+
+  def __len__ (self):
+    return 0
+
+
+def _flow_mod_spec_to_class (is_src, val):
+  #TODO: Use a class registry and decorator for these instead of this hack
+  if is_src:
+    d = {
+          NX_LEARN_SRC_FIELD: nx_learn_src_field,
+          NX_LEARN_SRC_IMMEDIATE: nx_learn_src_immediate,
+        }
+  else:
+    d = {
+          NX_LEARN_DST_MATCH: nx_learn_dst_match,
+          NX_LEARN_DST_LOAD: nx_learn_dst_load,
+          NX_LEARN_DST_OUTPUT: nx_learn_dst_output,
+        }
+
+  return d.get(val)
+
+
+class flow_mod_spec_chain (list):
+  def chain (self, *args, **kw):
+    self.append(flow_mod_spec.new(*args,**kw))
+    return self
+
+#class _meta_fms (type):
+#  @property
+#  def chain (self):
+#    return _flow_mod_spec_chain()
+
+class flow_mod_spec (object):
+#  __metaclass__ = _meta_fms
+  @classmethod
+  def create (cls, src, dst = None, n_bits = None):
+    #TODO: Remove me
+    return cls(src, dst, n_bits)
+
+  def __init__ (self, src, dst = None, n_bits = None):
+    assert src._is_src
+    if dst is None:
+      # Assume same as src
+      assert type(src) == nx_learn_src_field
+      dst = src.matching
+    assert dst._is_dst
+
+    #TODO: Check whether there's enough space in dst
+    # (This will require figuring out what the right length for output is...
+    #  16 bits?)
+    if n_bits is None:
+      n_bits = src.n_bits
+      if n_bits is None:
+        n_bits = dst.n_bits
+      else:
+        if dst.n_bits is not None and dst.n_bits > n_bits:
+          raise RuntimeError("dst n_bits greater than source n_bits "
+                             "(%s and %s); cannot infer" % (n_bits,dst.n_bits))
+      if n_bits is None:
+        raise RuntimeError("cannot infer n_bits")
+
+    #o = cls.__new__(cls)
+    #o.src = src
+    #o.dst = dst
+    #o.n_bits = n_bits
+    #return o
+    #return cls(src, dst, n_bits)
+    self.src = src
+    self.dst = dst
+    self.n_bits = n_bits
+
+  def __repr__ (self):
+    return "%s(src=%s, dst=%s, n_bits=%s)" % (
+      type(self).__name__, self.src, self.dst, self.n_bits)
+
+#  @staticmethod
+#  def chain ():
+#    return _flow_mod_spec_chain()
+
+  @classmethod
+  def new (cls, src=None, dst=None, **kw):
+    if src is not None: kw['src'] = src
+    if dst is not None: kw['dst'] = dst
+    src = None
+    dst = None
+    srcarg = ()
+    dstarg = ()
+    srckw = {}
+    dstkw = {}
+    src_inst = None
+    dst_inst = None
+    n_bits = None
+
+    for k,v in kw.iteritems():
+      # This is handy, though there's potentially future ambiguity
+      s = globals().get('nx_learn_' + k)
+      if not s:
+        s = globals().get('nx_learn_src_' + k)
+        if not s:
+          s = globals().get('nx_learn_dst_' + k)
+      if not s:
+        if k.startswith("src_"):
+          srckw[k[4:]] = v
+        elif k.startswith("dst_"):
+          dstkw[k[4:]] = v
+        elif k == "src":
+          assert isinstance(v, nx_learn_spec_src)
+          src_inst = v
+        elif k == "dst":
+          assert isinstance(v, nx_learn_spec_dst)
+          dst_inst = v
+        elif k == "n_bits":
+          n_bits = v
+        else:
+          raise RuntimeError("Don't know what to do with '%s'", (k,))
+        continue
+
+      if s._is_src:
+        assert src is None, "src already set"
+        src = s
+        srcarg = (v,)
+      if s._is_dst:
+        assert dst is None, "dst already set"
+        dst = s
+        dstarg = (v,)
+
+    if src_inst:
+      assert src is None, "can't set src and a spec type"
+      assert len(srckw) == 0, "can't set src params with src instance"
+    else:
+      assert src is not None, "no src set"
+      src_inst = src(*srcarg,**srckw)
+
+    if dst_inst:
+      assert dst is None, "can't set dst and a spec type"
+      assert len(dstkw) == 0, "can't set dst params with dst instance"
+    else:
+      if dst is not None: dst_inst = dst(*dstarg,**dstkw)
+
+    return cls.create(src_inst, dst_inst, n_bits)
+
+  chain = new
+
+  #def __init__ (self, src=None, dst=None, n_bits=0):
+  #  self.src = src
+  #  self.dst = dst
+  #  self.n_bits = n_bits
+
+  def pack (self):
+    assert isinstance(self.src, nx_learn_spec_src),str(self.src)
+    assert isinstance(self.dst, nx_learn_spec_dst),str(self.dst)
+    assert self.n_bits < 1024
+    v = self.src.value << 13 | self.dst.value << 11 | self.n_bits
+    p = struct.pack("!H", v)
+    p += self.src.pack() + self.dst.pack()
+    return p
+
+  @classmethod
+  def unpack_new (cls, raw, offset = 0):
+    """
+    May return a None object if it's padding
+    """
+    offset,(v,) = of._unpack("!H", raw, offset)
+    if v == 0:
+      # Special case for padding
+      return offset, None
+
+    n_bits = v & 1023
+
+    offset,src = nx_learn_spec_src.unpack_subclass((v >> 13) & 1,
+        n_bits, raw, offset)
+    offset,dst = nx_learn_spec_dst.unpack_subclass((v >> 11) & 3,
+        n_bits, raw, offset)
+
+    return offset, cls(src, dst, n_bits)
+
 
 # -----------------------------------------------------------------------
 # NXM support
@@ -845,8 +1550,8 @@ class _nxm_ip (object):
       assert len(value) == 2
       ip = value[0]
       self.mask = value[1]
-      if isinstance(mask, (int,long)):
-        self.mask = mask
+      #if isinstance(mask, (int,long)):
+      #  self.mask = mask
     elif isinstance(value, basestring) and len(value)>4 and '/' in value:
       temp = parse_cidr(value, infer=False)
       ip = temp[0]
@@ -866,7 +1571,7 @@ class _nxm_ip (object):
       if v > 32: v = 32
       elif v < 0: v = 0
       n = (0xffFFffFF << (32-v)) & 0xffFFffFF
-      return IPAddr(v, networkOrder=False).toRaw()
+      return IPAddr(n, networkOrder=False).toRaw()
     else:
       return IPAddr(v).toRaw()
   #def _unpack_mask (self, v):
@@ -884,7 +1589,6 @@ class _nxm_ipv6 (object):
   first is assumed to be any kind of IP address and the second is either
   a netmask or the number of network bits.
   """
-  #TODO: Fix this when IPv6 is available
 
   @property
   def value (self):
@@ -895,36 +1599,30 @@ class _nxm_ipv6 (object):
       assert len(value) == 2
       ip = value[0]
       self.mask = value[1]
-      if isinstance(mask, long):
-        self.mask = mask
-    #TODO
-    #elif isinstance(value, unicode) and u'/' in value:
-    #  temp = parse_cidr6(value, infer=False)
-    #  ip = temp[0]
-    #  self.mask = 128 if temp[1] is None else temp[1]
+    elif isinstance(value, (unicode,str)):
+      ip,mask = IPAddr6.parse_cidr(value, allow_host = True)
+      #self.mask = 128 if mask is None else mask
+      self.mask = mask
     else:
       ip = value
 
-    self._value = self._pack_value(value)
+    self._value = self._pack_value(ip)
 
   def _pack_value (self, v):
-    return v
-    #return IPAddr6(v).raw
+    return IPAddr6(v).raw
   def _unpack_value (self, v):
-    return v
-    #return IPAddr6(v, raw=True)
+    return IPAddr6(v, raw=True)
   def _pack_mask (self, v):
-    return v
-    #if isinstance(v, long):
-    #  # Assume CIDR
-    #  if v > 128: v = 128
-    #  elif v < 0: v = 0
-    #  n = (0xffFFffFF << (32-v)) & 0xffFFffFF
-    #  return IPAddr6(v, networkOrder=False).toRaw()
-    #else:
-    #  #return IPAddr6(v).raw
-  #def _unpack_mask (self, v):
-  #  # Special unpacking for CIDR-style?
+    if isinstance(v, (int,long)):
+      # Assume CIDR
+      if v > 128: v = 128
+      elif v < 0: v = 0
+      n = (((1<<128)-1) << (128-v)) & ((1<<128)-1)
+      return IPAddr6.from_num(n).raw
+    else:
+      return IPAddr6(v).raw
+#  def _unpack_mask (self, v):
+#    # Special unpacking for CIDR-style?
 
 
 class _nxm_ether (object):
@@ -940,9 +1638,19 @@ _nxm_name_to_type = {}
 class nxm_entry (object):
   #_nxm_type = _make_type(0x, )
   #_nxm_length = # bytes of data not including mask (double for mask)
+  _size_hint = None
   _force_mask = False
 
   #TODO: make mask-omittable a class-level attribute?
+
+  @classmethod
+  def _get_size_hint (self):
+    """
+    Number of significant bits
+    """
+    if self._size_hint is None:
+      return self._nxm_length * 8
+    return self._size_hint
 
   @property
   def nxm_vendor (self):
@@ -979,11 +1687,19 @@ class nxm_entry (object):
     #NOTE: Should use _class_for_nxm_header?
     c = _nxm_type_to_class.get(t)
     if c is None:
+      #TODO: Refactor with learn spec field property?
+
       e = NXM_GENERIC()
       e._nxm_length = length
       if has_mask:
         e._nxm_length /= 2
       e._nxm_type = t
+
+      # Alternate approach: Generate new subclass. To do: cache gen'd types?
+      #attrs = {'_nxm_type':t}
+      #attrs['_nxm_length'] = length/2 if has_mask else length
+      #c = type('nxm_type_'+str(t), (NXM_GENERIC,), attrs)
+      #e = c()
     else:
       e = c()
     assert data is not None
@@ -1106,7 +1822,7 @@ class nxm_entry (object):
   def __str__ (self):
     r = self.__class__.__name__ + "(" + str(self.value)
     if self.mask is not None:
-      if self.mask != ("\xff" * self._nxm_length):
+      if self.mask.raw != ("\xff" * self._nxm_length):
         r += "/" + str(self.mask)
     #if self.is_reg: r += "[r]"
     return r + ")"
@@ -1308,7 +2024,10 @@ def NXM_IS_NX_REG (o):
 # Nicira nxm_entries
 # -----------------------------------------------------------------------
 
+# Tunnel properties
 _make_nxm_w("NXM_NX_TUN_ID", 1, 16, 8)
+_make_nxm_w("NXM_NX_TUN_IPV4_SRC", 1, 31, 4, type=_nxm_ip)
+_make_nxm_w("NXM_NX_TUN_IPV4_DST", 1, 32, 4, type=_nxm_ip)
 
 # The ethernet address in an ethernet+IP ARP packet
 _make_nxm("NXM_NX_ARP_SHA", 1, 17, 6, type=_nxm_ether)
@@ -1351,8 +2070,79 @@ _make_nxm("NXM_NX_IP_TTL", 1, 29, 1)
 _make_nxm_w("NXM_NX_COOKIE", 1, 30, 8)
 
 
+# MPLS label, traffic class, and bottom-of-stack flag
+# Note that these are from OpenFlow 1.2 and I think BOS is from 1.3,
+# so technically these don't belong here.  They do work with OVS through
+# NXM match and flow mod, though.
+_make_nxm("OXM_OF_MPLS_LABEL", 0x8000, 34, 4, _size_hint=20)
+_make_nxm("OXM_OF_MPLS_TC", 0x8000, 35, 1, _size_hint=3)
+_make_nxm("OXM_OF_MPLS_BOS", 0x8000, 36, 1, _size_hint=1)
+
+
+#@vendor_s_message('NXT_SET_ASYNC_CONFIG', 19)
+class nx_async_config (nicira_base):
+  subtype = NXT_SET_ASYNC_CONFIG
+  _MIN_LENGTH = 40
+  def _init (self, kw):
+    # For master or other role
+    self.packet_in_mask = 0
+    self.port_status_mask = 0
+    self.flow_removed_mask = 0
+
+    # For slave role
+    self.packet_in_mask_slave = 0
+    self.port_status_mask_slave = 0
+    self.flow_removed_mask_slave = 0
+
+  def set_packet_in (self, bit, master=True, slave=True):
+    if master: self.packet_in_mask |= bit
+    if slave: self.packet_in_mask_slave |= bit
+
+  def set_port_status (self, bit, master=True, slave=True):
+    if master: self.port_status_mask |= bit
+    if slave: self.port_status_mask_slave |= bit
+
+  def set_flow_removed (self, bit, master=True, slave=True):
+    if master: selfflow_removed_mask |= bit
+    if slave: self.flow_removed_mask_slave |= bit
+
+  def _eq (self, other):
+    """
+    Return True if equal
+
+    Overide this.
+    """
+    for a in "packet_in port_status flow_removed".split():
+      a += "_mask"
+      if getattr(self, a) != getattr(other, a): return False
+      a += "_slave"
+      if getattr(self, a) != getattr(other, a): return False
+    return True
+
+  def _pack_body (self):
+    return struct.pack("!IIIIII",
+        self.packet_in_mask, self.packet_in_mask_slave,
+        self.port_status_mask, self.port_status_mask_slave,
+        self.flow_removed_mask, self.flow_removed_mask_slave)
+
+  def _unpack_body (self, raw, offset, avail):
+    """
+    Unpack body in raw starting at offset.
+
+    Return new offset
+    """
+    offset,tmp = of._unpack("!IIIIII", raw, offset)
+    self.packet_in_mask          = tmp[0]
+    self.packet_in_mask_slave    = tmp[1]
+    self.port_status_mask        = tmp[2]
+    self.port_status_mask_slave  = tmp[3]
+    self.flow_removed_mask       = tmp[4]
+    self.flow_removed_mask_slave = tmp[5]
+
+    return offset
+
+
 #@vendor_s_message('NXT_PACKET_IN', 17)
-NXT_PACKET_IN = 17
 class nxt_packet_in (nicira_base, of.ofp_packet_in):
   subtype = NXT_PACKET_IN
   _MIN_LENGTH = 34
@@ -1484,23 +2274,23 @@ class nx_match (object):
   nxm_entry type for the source IP address, so you can do:
 
     m = nx_match()
-    m.of_tcp_src = IPAddr("192.168.1.1")
+    m.of_ip_src = IPAddr("192.168.1.1")
 
   Since nxm_entries can have masks, you actually get a number of pseudo-
   properties, by appending "_mask", "_with_mask", or "_entry":
 
-    m.of_tcp_src_with_mask = ("192.168.1.0", "255.255.255.0")
+    m.of_ip_src_with_mask = ("192.168.1.0", "255.255.255.0")
     # or...
-    m.of_tcp_src = "192.168.1.0"
-    m.of_tcp_src_mask = "255.255.255.0"
+    m.of_ip_src = "192.168.1.0"
+    m.of_ip_src_mask = "255.255.255.0"
     # or...
-    m.of_tcp_src_entry = NXM_OF_IP_SRC("192.168.1.1", "255.255.255.0")
+    m.of_ip_src_entry = NXM_OF_IP_SRC("192.168.1.1", "255.255.255.0")
 
   nxm_entries themselves may have magic.  For example, IP address
   nxm_entries understand CIDR bits as part of the value, so you can do:
 
-    m.of_tcp_src = "192.168.1.0/24"
-    print m.of_tcp_src
+    m.of_ip_src = "192.168.1.0/24"
+    print m.of_ip_src
     > NXM_OF_IP_SRC(192.168.1.0/255.255.255.0)
 
   *The order you add entries is significant*.  If you have an entry
@@ -1511,6 +2301,7 @@ class nx_match (object):
   """
   #TODO: Test!
   #TODO: Handle prerequisites (as described above)
+  _locked = False # When True, can't add new attributes
 
   def __init__ (self, *parts, **kw):
     """
@@ -1524,6 +2315,7 @@ class nx_match (object):
     self._dirty()
     for k,v in kw:
       setattr(self, k, v)
+    self._locked = True
 
   def unpack (self, raw, offset, avail):
     del self._parts[:]
@@ -1640,8 +2432,6 @@ class nx_match (object):
   @staticmethod
   def _fixname (name):
     name = name.upper()
-    if not name.startswith("NXM_"):
-      name = "NXM_" + name
 
     is_mask = with_mask = is_entry = False
     if name.endswith("_MASK"):
@@ -1655,10 +2445,13 @@ class nx_match (object):
       name = name.rsplit("_ENTRY", 1)[0]
       is_entry = True
 
-    nxt = _nxm_name_to_type.get(name)
+    n = name
+    for prefix in ('', 'NXM_', 'NXM_OF_', 'OXM_', 'OXM_OF_', 'NXM_NX_'):
+      nxt = _nxm_name_to_type.get(prefix + n)
+      if nxt is not None: break
 
-    #print name, nxt, is_mask, with_mask, is_entry
-    return name, nxt, is_mask, with_mask, is_entry
+    #print n, nxt, is_mask, with_mask, is_entry
+    return n, nxt, is_mask, with_mask, is_entry
 
   def __getattr__ (self, name):
     name,nxt,is_mask,with_mask,is_entry = self._fixname(name)
@@ -1682,11 +2475,12 @@ class nx_match (object):
     if name.startswith('_'):
       return object.__setattr__(self, name, value)
 
-    name,nxt,is_mask,with_mask,is_entry = self._fixname(name)
+    n,nxt,is_mask,with_mask,is_entry = self._fixname(name)
 
     if nxt is None:
+      if self._locked:
+        raise AttributeError("No attribute " + name)
       return object.__setattr__(self, name, value)
-      #raise AttributeError("No attribute " + name)
 
     entry = self.find(nxt)
 
@@ -1751,7 +2545,6 @@ class nx_match (object):
 _old_unpacker = None
 
 def _unpack_nx_vendor (raw, offset):
-  from pox.lib.util import hexdump
   v = _unpack("!L", raw, offset + 8)[1][0]
   if v != NX_VENDOR_ID:
     return _old_unpacker(raw, offset)
@@ -1759,6 +2552,9 @@ def _unpack_nx_vendor (raw, offset):
   if subtype == NXT_PACKET_IN:
     npi = nxt_packet_in()
     return npi.unpack(raw, offset)[0], npi
+  elif subtype == NXT_ROLE_REPLY:
+    nrr = nx_role_reply()
+    return nrr.unpack(raw, offset)[0], nrr
   else:
     print "NO UNPACKER FOR",subtype
     return _old_unpacker(raw, offset)
@@ -1780,6 +2576,9 @@ def _handle_VENDOR (con, msg):
     e = con.ofnexus.raiseEventNoErrors(PacketIn, con, msg)
     if e is None or e.halt != True:
       con.raiseEventNoErrors(PacketIn, con, msg)
+#  elif isinstance(msg, nxt_role_reply):
+#    pass
+#    #TODO
   else:
     _old_handler(con, msg)
 
@@ -1804,7 +2603,8 @@ def launch (convert_packet_in = False):
   _init_handler()
   _init_unpacker()
 
-  core.registerNew(NX)
-
+  nx = NX()
   if convert_packet_in:
-    core.NX.convert_packet_in = True
+    nx.convert_packet_in = True
+
+  core.register("NX", nx)
