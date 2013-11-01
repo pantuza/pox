@@ -46,7 +46,7 @@ class Graph (object):
     except IndexError:
       return None
 
-  def add_edge (self, link):
+  def add_edge (self, link, weight):
     """
     Add an Edge and insert each vertex of the Edge in the adjacency list 
     of each other
@@ -55,7 +55,7 @@ class Graph (object):
     if link.id in self.edges:
       raise Exception("Link ID %s already in graph" % str(link.id))
 
-    edge = Edge(link)
+    edge = Edge(link, weight)
     self.edges[link.id] = edge
     v1 = self.get_vertex(link.entity1.id)
     v2 = self.get_vertex(link.entity2.id)
