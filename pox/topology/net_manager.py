@@ -1,4 +1,7 @@
 
+# TODO: remove this import
+import random import randint
+
 
 class NetManager(object):
 
@@ -41,9 +44,26 @@ class NetManager(object):
   def mst(self):
     """ Finds the Minimum Spanning Tree on the graph
     This is implementation is based on Prim algorithm
+    using adjacent list
     """
 
     mst = []
     edges = []
 
-     
+    # Find the edges of the vertexes and insert it in a list
+    for vertex in self.graph.vertexes:
+      for adjacent in vertex.adjacency:
+        edges.append(vertex, adjacent, randint(0, 10))
+
+    # If the edge list is empty returns an empty Minimum Spanning Tree
+    if not edges:
+      return mst
+
+    # Minimun Spanning Trees always has |V| - 1 edges. So, we 
+    # search for minimum edges until that
+    while len(mst) < len(self.graph.vertexes) - 1:
+      min_edge = self.min_edge(mst, edges)
+      edges.remove(min_edge)
+      mst.append(min_edge)
+
+    return mst
