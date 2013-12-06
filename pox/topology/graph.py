@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 
 from pox.core import core
+from pox.openflow import libopenflow_01 as of
+from pox.openflow.of_json import flow_stats_to_list
+from pox.lib.util import dpidToStr
+from pox.lib.recoco import Timer
 
 from pox.topology.edge import Edge
 from pox.topology.vertex import Vertex
@@ -46,7 +50,7 @@ class Graph (object):
     except IndexError:
       return None
 
-  def add_edge (self, link, weight):
+  def add_edge (self, link, weight=None):
     """
     Add an Edge and insert each vertex of the Edge in the adjacency list 
     of each other
@@ -94,6 +98,29 @@ class Graph (object):
       core.topology.addListenerByName("LinkLeave", self._handle_LinkLeave)
       core.topology.addListenerByName("EntityLeave", self._handle_EntityLeave)
       core.topology.addListenerByName("EntityLeave", self._handle_EntityLeave)
+      if core.hasComponent("openflow"):
+        core.openflow.addListenerByName("FlowStatsReceived", 
+          self._handle_flow_stats)
+        core.openflow.addListenerByName("PortStatsReceived", 
+          self._handle_port_stats)
+        Timer(4, self._handle_timer_stats, recurring = True)
+
+  def _handle_timer_stats(self):
+    for connection in core.openflow._connections.values():
+      connection.send(of.ofp_stats_request(body=of.ofp_flow_stats_request()))
+      connection.send(of.ofp_stats_request(body=of.ofp_port_stats_request()))
+    self.log.info("Sent %i flow/port stats request(s)",
+                    len(core.openflow._connections))
+
+  def _handle_flow_stats(self, event):
+    stats = flow_stats_to_list(event.stats)
+    self.log.info("FlowStatsReceived from %s: %s", 
+      dpidToStr(event.connection.dpid), stats)
+
+  def _handle_port_stats(self, event):
+    stats = flow_stats_to_list(event.stats)
+    self.log.info("PortStatsReceived from %s: %s",
+      dpidToStr(event.connection.dpid), stats)
 
   def _handle_SwitchJoin (self, event):
     """  """
@@ -144,7 +171,6 @@ class Graph (object):
     """  """
     self.log.info("LinkLeave fired")
     self.remove_edge(event.link)
-
 
 
 def launch ():
