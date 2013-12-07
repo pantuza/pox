@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 
+from time import time
+import pydot
+
 from pox.core import core
 from pox.openflow import libopenflow_01 as of
 from pox.openflow.of_json import flow_stats_to_list
@@ -35,9 +38,9 @@ class Graph (object):
     """
     if entity.id in self.vertexes:
       vertex = self.vertexes[entity.id]
-      for adj_vertex, links in vertex.adjacency.items():
-        for link in links:
-          self.remove_edge(link)
+      for edges in vertex.adjacency:
+        for edge in edges:
+          self.remove_edge(edge)
       del self.vertexes[entity.id]
   
   def get_vertex (self, id=None):
@@ -49,6 +52,49 @@ class Graph (object):
       return self.vertexes[id]
     except IndexError:
       return None
+
+  def get_adjacents(self, id=None):
+    """
+    Returns the adjacent list of a given vertex
+    """
+
+    try:
+      return self.vertexes[id].get_adjacents()
+    except IndexError:
+      return None
+
+  def snapshot(self):
+    """
+    Returns a snapshot of the graph. A tuple of vertices and edges
+    """
+    return (self.vertexes.keys(),
+            [(edge.key[0], edge.key[1], edge.weight) for edge in
+              self.edges.items()])
+
+  def to_dot(self):
+    """
+    Return the graph in DOT format
+    """
+    # Creates an undericted graph
+    dot = pydot.Dot(graph_type='graph')
+
+    # Creates the edges with weights
+    for edge in self.edges.items():
+      
+      if isinstance(self.vertexes[edge.key[0]].entity, Host):
+        node0 = dot.add_node(pydot.Node("Host %s" % edge.key[0]))
+      elif isinstance(self.vertexes[edge.key[1]].entity, Switch):
+        node1 = dot.add_node(pydot.Node("Switch %s" % edge.key[0]))
+
+      if isinstance(self.vertexes[edge.key[1]].entity, Host):
+        node0 = dot.add_node(pydot.Node("Host %s" % edge.key[1]))
+      elif isinstance(self.vertexes[edge.key[1]].entity, Switch):
+        node1 = dot.add_node(pydot.Node("Switch %s" % edge.key[1]))
+
+      dot.add_edge(node0, node1, label=edge.weight)
+
+      # writes an image of the graph
+      dot.write_png("graph-%d.png" % int(time()))
 
   def add_edge (self, link, weight=None):
     """
@@ -65,20 +111,20 @@ class Graph (object):
     v2 = self.get_vertex(link.entity2.id)
     
     if v1 and v2:
-      v1.add_adjacency(v2, link)
-      v2.add_adjacency(v1, link)
+      v1.add_adjacency(v2, edge)
+      v2.add_adjacency(v1, edge)
 
-  def remove_edge (self, link):
+  def remove_edge (self, edge):
     """
     Removes an Edge and its references inside adjacency list of vertexes 
     """
     
-    if link.id not in self.edges:
-      raise Exception("Link ID %s is not in graph" % str(link.id))
+    if edge.entity.id not in self.edges:
+      raise Exception("Link ID %s is not in graph" % str(edge.entity.id))
 
-    del self.edges[link.id]
-    v1 = self.get_vertex(link.entity1.id)
-    v2 = self.get_vertex(link.entity2.id)
+    del self.edges[edge.entity.id]
+    v1 = self.get_vertex(edge.entity.entity1.id)
+    v2 = self.get_vertex(edge.entity.entity2.id)
     
     if v1 and v2:
       v1.remove_adjacency(v2)
