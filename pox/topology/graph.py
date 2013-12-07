@@ -8,9 +8,13 @@ from pox.openflow import libopenflow_01 as of
 from pox.openflow.of_json import flow_stats_to_list
 from pox.lib.util import dpidToStr
 from pox.lib.recoco import Timer
-
+from pox.lib.addresses import EthAddr
 from pox.topology.edge import Edge
 from pox.topology.vertex import Vertex
+from pox.topology.topology import Host
+from pox.topology.topology import Switch
+from pox.topology.topology import Link
+from pox.topology.net_manager import NetManager
 
 
 class Graph (object):
@@ -23,12 +27,14 @@ class Graph (object):
     self.vertexes = {}
     self.edges = {}
     self._subscribe()
+    self.net_manager = NetManager(self)
+    self.dot = None
 
   def add_vertex (self, entity):
     """
     Add a new Graph Entity (Vertex) to the graph vertixes
     """
-
+    
     if entity.id not in self.vertexes:
       self.vertexes[entity.id] = Vertex(entity)
   
@@ -79,34 +85,48 @@ class Graph (object):
     dot = pydot.Dot(graph_type='graph')
 
     # Creates the edges with weights
-    for edge in self.edges.items():
-      
+    for edge in self.edges.values():
       if isinstance(self.vertexes[edge.key[0]].entity, Host):
-        node0 = dot.add_node(pydot.Node("Host %s" % edge.key[0]))
-      elif isinstance(self.vertexes[edge.key[1]].entity, Switch):
-        node1 = dot.add_node(pydot.Node("Switch %s" % edge.key[0]))
+        node0 = pydot.Node("Host %s" % edge.key[0], fontsize="10.0")
+        node0.set_shape("rect")
+      elif isinstance(self.vertexes[edge.key[0]].entity, Switch):
+        node0 = pydot.Node("Switch %s" % edge.key[0], fontsize="10.0")
+        node0.set_shape("diamond")
+
+      dot.add_node(node0)
 
       if isinstance(self.vertexes[edge.key[1]].entity, Host):
-        node0 = dot.add_node(pydot.Node("Host %s" % edge.key[1]))
+        node1 = pydot.Node("Host %s" % edge.key[1], fontsize="10.0")
+        node1.set_shape("rect")
       elif isinstance(self.vertexes[edge.key[1]].entity, Switch):
-        node1 = dot.add_node(pydot.Node("Switch %s" % edge.key[1]))
+        node1 = pydot.Node("Switch %s" % edge.key[1], fontsize="10.0")
+        node1.set_shape("diamond")
+      
+      dot.add_node(node1)
 
-      dot.add_edge(node0, node1, label=edge.weight)
+      if edge.weight is not None:
+        dotedge = pydot.Edge(node0, node1, label=edge.weight, fontsize="9.0")
+      else:
+        dotedge = pydot.Edge(node0, node1, label=0, fontsize="9.0")
 
-      # writes an image of the graph
-      dot.write_png("graph-%d.png" % int(time()))
+      dot.add_edge(dotedge)
+
+    self.log.info("Writing graph image...")
+    # writes an image of the graph
+    dot.write_png("graph.png") #% int(time()))
+    self.dot = dot
 
   def add_edge (self, link, weight=None):
     """
     Add an Edge and insert each vertex of the Edge in the adjacency list 
     of each other
     """
-    
+
     if link.id in self.edges:
       raise Exception("Link ID %s already in graph" % str(link.id))
 
     edge = Edge(link, weight)
-    self.edges[link.id] = edge
+    self.edges[edge.key] = edge
     v1 = self.get_vertex(link.entity1.id)
     v2 = self.get_vertex(link.entity2.id)
     
@@ -114,17 +134,19 @@ class Graph (object):
       v1.add_adjacency(v2, edge)
       v2.add_adjacency(v1, edge)
 
+    self.log.info(self.net_manager.mst())
+
   def remove_edge (self, edge):
     """
     Removes an Edge and its references inside adjacency list of vertexes 
     """
     
-    if edge.entity.id not in self.edges:
-      raise Exception("Link ID %s is not in graph" % str(edge.entity.id))
+    if edge.key not in self.edges:
+      raise Exception("Link ID %s is not in graph" % str(edge.key))
 
-    del self.edges[edge.entity.id]
-    v1 = self.get_vertex(edge.entity.entity1.id)
-    v2 = self.get_vertex(edge.entity.entity2.id)
+    del self.edges[edge.key]
+    v1 = self.get_vertex(edge.key[0])
+    v2 = self.get_vertex(edge.key[1])
     
     if v1 and v2:
       v1.remove_adjacency(v2)
@@ -149,24 +171,45 @@ class Graph (object):
           self._handle_flow_stats)
         core.openflow.addListenerByName("PortStatsReceived", 
           self._handle_port_stats)
-        Timer(4, self._handle_timer_stats, recurring = True)
+        Timer(5, self._handle_timer_stats, recurring = True)
+        Timer(10, self.to_dot, recurring = True)
 
   def _handle_timer_stats(self):
     for connection in core.openflow._connections.values():
       connection.send(of.ofp_stats_request(body=of.ofp_flow_stats_request()))
       connection.send(of.ofp_stats_request(body=of.ofp_port_stats_request()))
-    self.log.info("Sent %i flow/port stats request(s)",
-                    len(core.openflow._connections))
+    #self.log.info("Sent %i flow/port stats request(s)",
+    #                len(core.openflow._connections))
 
   def _handle_flow_stats(self, event):
     stats = flow_stats_to_list(event.stats)
-    self.log.info("FlowStatsReceived from %s: %s", 
-      dpidToStr(event.connection.dpid), stats)
+    for entry in stats:
+      host = core.topology.getEntityByID(EthAddr(entry['match']['dl_dst']))
+      switch = core.topology.getEntityByID(event.dpid)
+      key = (switch.id, host.id)
+
+      try:
+        weight = entry['byte_count'] - self.edges[key].weight
+#        self.edges[key].weight = weight if weight > 0 else entry['byte_count']
+      except:
+        continue
+
+    #self.log.info("FlowStatsReceived from %s: %s", 
+    #              dpidToStr(event.connection.dpid), stats)
 
   def _handle_port_stats(self, event):
     stats = flow_stats_to_list(event.stats)
-    self.log.info("PortStatsReceived from %s: %s",
-      dpidToStr(event.connection.dpid), stats)
+
+    for entry in stats:
+
+      port = entry['port_no']
+
+      for v in self.vertexes.values():
+        if isinstance(v.entity, Host):
+          if v.entity.switch.id == event.dpid and v.entity.port.number == port:
+            weight = entry['rx_bytes'] + entry['tx_bytes']
+            self.edges[(v.entity.switch.id, v.entity.id)].weight = weight 
+
 
   def _handle_SwitchJoin (self, event):
     """  """
@@ -181,12 +224,15 @@ class Graph (object):
     self.add_vertex(event.host)
 
     if event.host.switch is not None:
-      switch = self.get_vertex(event.host.switch.id)
-      if switch is not None:
-        self.add_edge(Link(switch, event.host))
+      # Add the unknown switch as a vertex
+      if not self.get_vertex(event.host.switch.id):
+        self.add_vertex(event.host.switch)
+      
+      self.add_edge(Link(event.host.switch, event.host))
+    
   
 #    self.log.info(", ".join([str(vertex) for vertex in self.vertexes]))
-    self.log.info(str(self.edges))
+    #self.log.info(str(self.edges))
 
   def _handle_SwitchLeave (self, event):
     """  """

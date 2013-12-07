@@ -1,6 +1,5 @@
-
 # TODO: remove this import
-import random import randint
+from random import randint
 
 
 class NetManager(object):
@@ -28,7 +27,7 @@ class NetManager(object):
     Returns the edge with the minimum weight and that is linked to 
     a vertex in the MST
     """
-    min_edge = None
+    min_edge = edges[0]
     WEIGHT = 2
 
     for edge in edges:
@@ -49,11 +48,10 @@ class NetManager(object):
 
     mst = []
     edges = []
-
     # Find the edges of the vertexes and insert it in a list
-    for vertex in self.graph.vertexes:
-      for adjacent in vertex.adjacency:
-        edges.append(vertex, adjacent, randint(0, 10))
+    for vertex in self.graph.vertexes.values():
+      for adjacent, edge in vertex.adjacency.items():
+        edges.append((vertex, adjacent, edge[0].weight))
 
     # If the edge list is empty returns an empty Minimum Spanning Tree
     if not edges:

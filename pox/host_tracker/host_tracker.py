@@ -406,7 +406,8 @@ class host_tracker (EventMixin):
       self.updateIPInfo(pckt_srcip,macEntry,hasARP)
 
     if core.topology.getEntityByID(macEntry.macaddr) is None:
-      host = Host(id=macEntry.macaddr, mac=macEntry.macaddr, ip=pckt_srcip)
+      host = Host(id=macEntry.macaddr, mac=macEntry.macaddr, 
+                  ip=pckt_srcip, dpid=dpid, port=inport)
       core.topology.addEntity(host)
 
     if self.eat_packets and packet.dst == self.ping_src_mac:

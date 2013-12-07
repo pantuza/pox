@@ -158,12 +158,12 @@ class Host (Entity):
   """
   A generic Host entity.
   """
-  def __init__ (self, id=None, mac=None, ip=None, dpid=None):
+  def __init__ (self, id=None, mac=None, ip=None, dpid=None, port=None):
     Entity.__init__(self, id)
     self.mac = mac
     self.ip = ip
-    
     self.switch = core.topology.getEntityByID(dpid)
+    self.port = self.switch.ports[port]
     
 
 class Switch (Entity):
