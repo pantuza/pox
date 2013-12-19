@@ -2,6 +2,7 @@
 
 from time import time
 import pydot
+import matplotlib.pyplot as plt
 
 from pox.core import core
 from pox.openflow import libopenflow_01 as of
@@ -15,6 +16,7 @@ from pox.topology.topology import Host
 from pox.topology.topology import Switch
 from pox.topology.topology import Link
 from pox.topology.net_manager import NetManager
+from networkx import networkx as nx
 
 
 class Graph (object):
@@ -56,7 +58,7 @@ class Graph (object):
     
     try:
       return self.vertexes[id]
-    except IndexError:
+    except KeyError:
       return None
 
   def get_adjacents(self, id=None):
@@ -77,10 +79,19 @@ class Graph (object):
             [(edge.key[0], edge.key[1], edge.weight) for edge in
               self.edges.items()])
 
+  def get_mst(self):
+    """
+    Returns the online Minimum Spanning Tree
+    """
+    return self.net_manager.mst()
+
   def to_dot(self):
     """
     Return the graph in DOT format
     """
+    host_height = 0.2
+    host_width = 0.2
+
     # Creates an undericted graph
     dot = pydot.Dot(graph_type='graph')
 
@@ -89,8 +100,11 @@ class Graph (object):
       if isinstance(self.vertexes[edge.key[0]].entity, Host):
         node0 = pydot.Node("Host %s" % edge.key[0], fontsize="10.0")
         node0.set_shape("rect")
+        node0.set_height(host_height)
+        node0.set_width(host_width)
       elif isinstance(self.vertexes[edge.key[0]].entity, Switch):
-        node0 = pydot.Node("Switch %s" % edge.key[0], fontsize="10.0")
+        node0 = pydot.Node("Switch %s" % edge.key[0], fontsize="10.0",
+            color="blue")
         node0.set_shape("diamond")
 
       dot.add_node(node0)
@@ -98,8 +112,12 @@ class Graph (object):
       if isinstance(self.vertexes[edge.key[1]].entity, Host):
         node1 = pydot.Node("Host %s" % edge.key[1], fontsize="10.0")
         node1.set_shape("rect")
+        node1.set_height(host_height)
+        node1.set_width(host_width)
+
       elif isinstance(self.vertexes[edge.key[1]].entity, Switch):
-        node1 = pydot.Node("Switch %s" % edge.key[1], fontsize="10.0")
+        node1 = pydot.Node("Switch %s" % edge.key[1], fontsize="10.0",
+            color="blue")
         node1.set_shape("diamond")
       
       dot.add_node(node1)
@@ -111,16 +129,69 @@ class Graph (object):
 
       dot.add_edge(dotedge)
 
-    self.log.info("Writing graph image...")
+    self.log.info("Writing graph image with %d nodes and %d edges...", 
+                  len(self.vertexes), len(self.edges))
     # writes an image of the graph
-    dot.write_png("graph.png") #% int(time()))
+    dot.write_png("graph.png")
+    dot.write(path="graph.dot", format="raw")
+    graph = nx.read_dot("graph.dot")
+    nx.write_gexf(graph, "graph.gexf")
     self.dot = dot
+    return self.dot
+
+  def to_gexf(self):
+
+    node0, node1 = None, None
+    graph = nx.Graph()
+    # Creates the edges with weights
+    for edge in self.edges.values():
+
+      entity0 = self.vertexes[edge.key[0]].entity
+      if isinstance(entity0, Host):
+        node0 = "Host %s" % entity0.ip.toStr().split(".")[-1]
+        graph.add_node(node0)
+      elif isinstance(entity0, Switch):
+        node0 = "Switch %s" % entity0.id
+        graph.add_node(node0, color='blue')
+
+      entity1 = self.vertexes[edge.key[1]].entity
+      if isinstance(entity1, Host):
+        node1 = "Host %s" % entity1.ip.toStr().split(".")[-1]
+        graph.add_node(node1)
+      elif isinstance(entity1, Switch):
+        node1 = "Switch %s" % entity1.id
+        graph.add_node(node1, color='blue')
+      
+      if edge.weight is not None:
+        graph.add_edge(node0, node1, weight=edge.weight)
+      else:
+        graph.add_edge(node0, node1, weight=0)
+
+    self.log.info("Writing graph image with %d nodes...", len(self.vertexes))
+
+    # color values
+    colors=[node.get('color', '#A0CBE2') for node in graph.node.values()]
+
+    nx.draw_graphviz(graph, 
+                     scale=3, 
+                     cmap = plt.get_cmap('jet'),
+                     node_color=colors,
+                     node_size=50,
+                     with_labels=False,
+                     width=1,
+                     edge_cmap=plt.cm.Blues)
+    plt.draw()
+    plt.savefig("graph.png", format="png", dpi=500)
+    plt.clf() 
+    nx.write_gexf(graph, "graph.gexf")
 
   def add_edge (self, link, weight=None):
     """
     Add an Edge and insert each vertex of the Edge in the adjacency list 
     of each other
     """
+    if not hasattr(link, "id"):
+      return
 
     if link.id in self.edges:
       raise Exception("Link ID %s already in graph" % str(link.id))
@@ -134,7 +205,7 @@ class Graph (object):
       v1.add_adjacency(v2, edge)
       v2.add_adjacency(v1, edge)
 
-    self.log.info(self.net_manager.mst())
+    self.net_manager.mst()
 
   def remove_edge (self, edge):
     """
@@ -172,7 +243,7 @@ class Graph (object):
         core.openflow.addListenerByName("PortStatsReceived", 
           self._handle_port_stats)
         Timer(5, self._handle_timer_stats, recurring = True)
-        Timer(10, self.to_dot, recurring = True)
+        Timer(15, self.to_gexf, recurring = True)
 
   def _handle_timer_stats(self):
     for connection in core.openflow._connections.values():
@@ -182,6 +253,7 @@ class Graph (object):
     #                len(core.openflow._connections))
 
   def _handle_flow_stats(self, event):
+    # Ignore this function
     stats = flow_stats_to_list(event.stats)
     for entry in stats:
       host = core.topology.getEntityByID(EthAddr(entry['match']['dl_dst']))
@@ -198,18 +270,45 @@ class Graph (object):
     #              dpidToStr(event.connection.dpid), stats)
 
   def _handle_port_stats(self, event):
-    stats = flow_stats_to_list(event.stats)
 
+    stats = flow_stats_to_list(event.stats)
+    control_list = []
     for entry in stats:
 
       port = entry['port_no']
-
       for v in self.vertexes.values():
         if isinstance(v.entity, Host):
           if v.entity.switch.id == event.dpid and v.entity.port.number == port:
-            weight = entry['rx_bytes'] + entry['tx_bytes']
-            self.edges[(v.entity.switch.id, v.entity.id)].weight = weight 
+            
+            edge_key = (v.entity.switch.id, v.entity.id)
+            nbytes = entry['rx_bytes'] + entry['tx_bytes']
+            weight = nbytes - self.edges[edge_key].prev_weight_count
+            self.edges[edge_key].weight = weight
+            self.edges[edge_key].prev_weight_count = nbytes
+            
+        
+        elif isinstance(v.entity, Switch):
+          for edge in self.edges.values():
+            if edge.type == Edge.TYPES[1] and v.entity.id == event.dpid:
+              nbytes = entry['rx_bytes'] + entry['tx_bytes']
+             # if v.entity.id == edge.key[0]:
+              try:
+                edge_key = (v.entity.id, edge.key[1])
+                if edge_key not in control_list:
 
+                  weight = nbytes - self.edges[edge_key].prev_weight_count
+                  self.edges[edge_key].weight = weight 
+                  self.edges[edge_key].prev_weight_count = nbytes
+                  control_list.append(edge_key)
+              
+              except KeyError:
+                continue
+
+#     elif v.entity.id == edge.key[1]:
+          #      edge_key = (edge.key[0], v.entity.id)
+           #     weight = nbytes - self.edges[edge_key].weight
+            #    self.log.info("1 %s -> %d", edge_key, weight)
+             #   self.edges[edge_key].weight = weight 
 
   def _handle_SwitchJoin (self, event):
     """  """
@@ -262,7 +361,11 @@ class Graph (object):
   def _handle_LinkLeave (self, event):
     """  """
     self.log.info("LinkLeave fired")
-    self.remove_edge(event.link)
+    try:
+      edge = self.edges[(event.link.entity1.id, event.link.entity2.id)]
+      #self.remove_edge(edge)
+    except KeyError:
+      return
 
 
 def launch ():

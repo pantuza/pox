@@ -27,18 +27,19 @@ class NetManager(object):
     Returns the edge with the minimum weight and that is linked to 
     a vertex in the MST
     """
-    min_edge = edges[0]
-    WEIGHT = 2
+    if len(edges) > 0:
+      min_edge = edges[0]
+      WEIGHT = 2
 
-    for edge in edges:
-      if self.linked(edge, mst):
+      for edge in edges:
+        if self.linked(edge, mst):
 
-        # if there isn't a min_edge or the current edge weight is less than 
-        # min_edge weight, then update min_edge with the current edge
-        if min_edge is None or edge[WEIGHT] < min_edge[WEIGHT]:
-          min_edge = edge
+          # if there isn't a min_edge or the current edge weight is less than 
+          # min_edge weight, then update min_edge with the current edge
+          if min_edge is None or edge[WEIGHT] < min_edge[WEIGHT]:
+            min_edge = edge
 
-    return min_edge
+      return min_edge
 
   def mst(self):
     """ Finds the Minimum Spanning Tree on the graph
