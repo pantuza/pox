@@ -37,23 +37,23 @@ import random
 import sys
 import os
 
-POLICE_NO_LB = 0
-POLICE_RANDOM = 1
-POLICE_ROUND_ROBIN = 2
-POLICE_SERVER_LOAD = 3
-POLICE_SERVER_QUEUE = 4
-POLICE_SERVER_MIXED = 5
-POLICE_DEFAULT = POLICE_ROUND_ROBIN
+POLICY_NO_LB = 0
+POLICY_RANDOM = 1
+POLICY_ROUND_ROBIN = 2
+POLICY_SERVER_LOAD = 3
+POLICY_SERVER_QUEUE = 4
+POLICY_SERVER_MIXED = 5
+POLICY_DEFAULT = POLICY_ROUND_ROBIN
 
-POLICE_NAME = {}
-POLICE_NAME[POLICE_NO_LB] = 'no'
-POLICE_NAME[POLICE_RANDOM] = 'random'
-POLICE_NAME[POLICE_ROUND_ROBIN] = 'round-robin'
-POLICE_NAME[POLICE_SERVER_LOAD] = 'load'
-POLICE_NAME[POLICE_SERVER_QUEUE] = 'queue'
-POLICE_NAME[POLICE_SERVER_MIXED] = 'mix'
+POLICY_NAME = {}
+POLICY_NAME[POLICY_NO_LB] = 'no'
+POLICY_NAME[POLICY_RANDOM] = 'random'
+POLICY_NAME[POLICY_ROUND_ROBIN] = 'round-robin'
+POLICY_NAME[POLICY_SERVER_LOAD] = 'load'
+POLICY_NAME[POLICY_SERVER_QUEUE] = 'queue'
+POLICY_NAME[POLICY_SERVER_MIXED] = 'mix'
 
-POLICE_NUMBER = {y:x for x,y in POLICE_NAME.iteritems()}
+POLICY_NUMBER = {y:x for x,y in POLICY_NAME.iteritems()}
 
 MONITOR_LOAD = 0
 MONITOR_QUEUE = 1
@@ -124,7 +124,7 @@ class iplb (object):
   We probe the servers to see if they're alive by sending them ARPs.
   """
   def __init__ (self, connection, service_ip, servers, 
-                      police, logfile, ir,
+                      policy, logfile, ir,
                       monitor_interval, preview, llp, 
                       ipprot, probe,
                       softtimeout, hardtimeout):
@@ -164,7 +164,7 @@ class iplb (object):
 
     # As part of a gross hack, we now do this from elsewhere
     #self.con.addListeners(self)
-    self._start(logfile, police, monitor_interval, preview, llp, ipprot, softtimeout, hardtimeout)
+    self._start(logfile, policy, monitor_interval, preview, llp, ipprot, softtimeout, hardtimeout)
     self._show_cfg()
 
   def __del__ (self):
@@ -237,13 +237,13 @@ class iplb (object):
     #self.log.info("Time???? = " + str(r))
     return r
 
-  def _start(self, logfile, police, monitor_interval, preview, llp, ipprot, sto, hto):
+  def _start(self, logfile, policy, monitor_interval, preview, llp, ipprot, sto, hto):
 
     self.pkg_in_count = 0
     self.match_ipprot = ipprot
     self.ordered_servers = self.servers[:]
     self.ordered_servers.sort()
-    self.set_police(police, monitor_interval, preview, llp)
+    self.set_policy(policy, monitor_interval, preview, llp)
     self.set_timeout(sto, hto)
 
     self.mpath = MPATH
@@ -264,8 +264,8 @@ class iplb (object):
     log.info("Server config:")
     log.info("- IP                = " + str(self.service_ip))
     log.info("- IMMEDIATE_REVERSE = " + str(self.immediate_reverse))
-    log.info("- POLICE            = " + str(POLICE_NAME[self.police]))
-    log.info("- PREVIEW           = " + str(self.preview_police))
+    log.info("- POLICY            = " + str(POLICY_NAME[self.policy]))
+    log.info("- PREVIEW           = " + str(self.preview_policy))
     log.info("- LAST_LOAD_PREVIEW = " + str(self.last_load_preview))
     log.info("- IP_PROTOCOL       = " + str(self.match_ipprot))
     log.info("- MONITOR_DELAY     = " + str(self.monitoring_interval))
@@ -281,8 +281,8 @@ class iplb (object):
     name = self.mpath+'/tmp/lb'
     name += '_'+str(self.service_ip)
     name += '_'+str(self.immediate_reverse)
-    name += '_'+str(POLICE_NAME[self.police])
-    name += '_'+str(self.preview_police)
+    name += '_'+str(POLICY_NAME[self.policy])
+    name += '_'+str(self.preview_policy)
     name += '_'+str(self.match_ipprot)
     name += '_'+str(self.monitoring_interval)
     name += '_'+str(self.probe_cycle_time)
@@ -340,7 +340,7 @@ class iplb (object):
 
     return server
 
-  def _police_round_robin(self, key, inport):
+  def _policy_round_robin(self, key, inport):
       tries = 0
       num_servers = len(self.ordered_servers)
       while tries < num_servers:
@@ -365,25 +365,25 @@ class iplb (object):
          ip = k
      return ip
      
-  def _police_server_mix(self, key, inport):
+  def _policy_server_mix(self, key, inport):
       ip = min(self.server_load, key=self.server_load.get)
-      if self.preview_police:
-          self._police_preview(ip)
+      if self.preview_policy:
+          self._policy_preview(ip)
       return ip
 
-  def _police_server_load(self, key, inport):
+  def _policy_server_load(self, key, inport):
       ip = self._min(self.server_load, MONITOR_LOAD)
-      if self.preview_police:
-          self._police_preview(ip)
+      if self.preview_policy:
+          self._policy_preview(ip)
       return ip
 
-  def _police_server_queue(self, key, inport):
+  def _policy_server_queue(self, key, inport):
       ip = self._min(self.server_load, MONITOR_QUEUE)
-      if self.preview_police:
-          self._police_preview(ip)
+      if self.preview_policy:
+          self._policy_preview(ip)
       return ip
 
-  def _police_preview(self, ip):
+  def _policy_preview(self, ip):
       cur = self.server_load[ip]
       if self.last_load_preview and self.server_load[ip][MONITOR_LAST_TIME] > 0:
           pl = self.server_load[ip][MONITOR_LAST_TIME]
@@ -394,12 +394,12 @@ class iplb (object):
                               cur[MONITOR_LAST_TIME], 
                               cur[MONITOR_SEQ] + 1)
 
-  def _police_random(self, key, inport):
+  def _policy_random(self, key, inport):
     return random.choice(self.live_servers.keys())
 
-  def police_no_lb(self, key, inport):
+  def policy_no_lb(self, key, inport):
       self.next_server = 0
-      return self._police_round_robin(key, inport)
+      return self._policy_round_robin(key, inport)
 
   def set_timeout(self, sto, hto):
     if not isinstance(sto, float):
@@ -416,40 +416,40 @@ class iplb (object):
     self.flow_hard_timeout = hto      
 
 
-  def set_police(self, police, monitor_interval, preview, llp):
-    self.police = police
+  def set_policy(self, policy, monitor_interval, preview, llp):
+    self.policy = policy
     self.monitoring_interval = monitor_interval
     self.last_load_preview = llp
     if monitor_interval > 0.0001:
       self.instant_monitoring = False
-      #self.preview_police = True
+      #self.preview_policy = True
     else:
       self.instant_monitoring = True
-      #self.preview_police = False
-    self.preview_police = preview
+      #self.preview_policy = False
+    self.preview_policy = preview
     self.monitoring_count = 0
     self.last_monitoring = -self.monitoring_interval
     self.next_server = 0
-    if police == POLICE_NO_LB: 
+    if policy == POLICY_NO_LB: 
       self._monitor = False
-      self._bind_to = self.police_no_lb
-    elif police == POLICE_RANDOM: 
+      self._bind_to = self.policy_no_lb
+    elif policy == POLICY_RANDOM: 
       self._monitor = False
-      self._bind_to = self._police_random
-    elif police == POLICE_ROUND_ROBIN: 
+      self._bind_to = self._policy_random
+    elif policy == POLICY_ROUND_ROBIN: 
       self._monitor = False
-      self._bind_to = self._police_round_robin
-    elif police == POLICE_SERVER_LOAD: 
+      self._bind_to = self._policy_round_robin
+    elif policy == POLICY_SERVER_LOAD: 
       self._monitor = True
-      self._bind_to = self._police_server_load
-    elif police == POLICE_SERVER_QUEUE: 
+      self._bind_to = self._policy_server_load
+    elif policy == POLICY_SERVER_QUEUE: 
       self._monitor = True
-      self._bind_to = self._police_server_queue
-    elif police == POLICE_SERVER_MIXED: 
+      self._bind_to = self._policy_server_queue
+    elif policy == POLICY_SERVER_MIXED: 
       self._monitor = True
-      self._bind_to = self._police_server_mix
+      self._bind_to = self._policy_server_mix
     else:
-      raise Exception("Invalid police number = %d"%(police))
+      raise Exception("Invalid policy number = %d"%(policy))
 
   def _handle_PacketIn (self, event):
     #Erik
@@ -622,7 +622,7 @@ class iplb (object):
 # Remember which DPID we're operating on (first one to connect)
 _dpid = None
 
-def launch (ip, servers, police, logfile, 
+def launch (ip, servers, policy, logfile, 
             ir = False,
             preview = None,
             llp = None,
@@ -671,13 +671,13 @@ def launch (ip, servers, police, logfile,
   else:
     llp = False
  
-  if isinstance(police, str):
-    if police in POLICE_NUMBER:
-      police = POLICE_NUMBER[police]
-    elif police.isdigit():
-      police = int(police)
-  if (not isinstance(police, int)) or ((police < 0) or (police >= len(POLICE_NAME))):
-    police = POLICE_ROUND_ROBIN
+  if isinstance(policy, str):
+    if policy in POLICY_NUMBER:
+      policy = POLICY_NUMBER[policy]
+    elif policy.isdigit():
+      policy = int(policy)
+  if (not isinstance(policy, int)) or ((policy < 0) or (policy >= len(POLICY_NAME))):
+    policy = POLICY_ROUND_ROBIN
  
   if isinstance(ipprot, str):
     if ipprot not in ['tcp', 'udp']:
@@ -712,7 +712,7 @@ def launch (ip, servers, police, logfile,
       #Erik
       #import ipdb
       #ipdb.set_trace()
-      core.registerNew(iplb, event.connection, IPAddr(ip), servers, police, logfile, ir, monitor_interval, preview, llp, ipprot, probe, sto, hto)
+      core.registerNew(iplb, event.connection, IPAddr(ip), servers, policy, logfile, ir, monitor_interval, preview, llp, ipprot, probe, sto, hto)
       _dpid = event.dpid
       log.info("Datapath Id = %s ", _dpid )
       #Erik
