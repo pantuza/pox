@@ -28,16 +28,43 @@ from pox.lib.packet.ethernet import ethernet, ETHER_BROADCAST
 from pox.lib.packet.ipv4 import ipv4
 from pox.lib.packet.arp import arp
 from pox.lib.addresses import IPAddr, EthAddr
-from pox.lib.util import str_to_bool, dpid_to_str
+from pox.lib.util import str_to_bool, dpid_to_str, dpidToStr
 
 import pox.openflow.libopenflow_01 as of
 
 import time
 import random
+import sys
+import os
 
-FLOW_IDLE_TIMEOUT = 10
-FLOW_MEMORY_TIMEOUT = 60 * 5
+POLICE_NO_LB = 0
+POLICE_RANDOM = 1
+POLICE_ROUND_ROBIN = 2
+POLICE_SERVER_LOAD = 3
+POLICE_SERVER_QUEUE = 4
+POLICE_SERVER_MIXED = 5
+POLICE_DEFAULT = POLICE_ROUND_ROBIN
 
+POLICE_NAME = {}
+POLICE_NAME[POLICE_NO_LB] = 'no'
+POLICE_NAME[POLICE_RANDOM] = 'random'
+POLICE_NAME[POLICE_ROUND_ROBIN] = 'round-robin'
+POLICE_NAME[POLICE_SERVER_LOAD] = 'load'
+POLICE_NAME[POLICE_SERVER_QUEUE] = 'queue'
+POLICE_NAME[POLICE_SERVER_MIXED] = 'mix'
+
+POLICE_NUMBER = {y:x for x,y in POLICE_NAME.iteritems()}
+
+MONITOR_LOAD = 0
+MONITOR_QUEUE = 1
+MONITOR_LAST_TIME = 2
+MONITOR_SEQ = 3
+
+#MPATH = "/home/mininet/lb"
+MPATH = ".."
+
+with open(MPATH+"/pid/lb.pid", "w") as text_file:
+  text_file.write(str(os.getpid()))
 
 
 class MemoryEntry (object):
@@ -54,14 +81,17 @@ class MemoryEntry (object):
   the Nicira extension which can match packets with FIN set to remove them
   when the connection closes.
   """
-  def __init__ (self, server, first_packet, client_port):
+  def __init__ (self, server, first_packet, client_port, ipprot):
     self.server = server
     self.first_packet = first_packet
     self.client_port = client_port
+    self.ipprot = ipprot
+    self.flow_memory_timeout = 60 * 5
     self.refresh()
 
+
   def refresh (self):
-    self.timeout = time.time() + FLOW_MEMORY_TIMEOUT
+    self.timeout = time.time() + self.flow_memory_timeout
 
   @property
   def is_expired (self):
@@ -71,17 +101,17 @@ class MemoryEntry (object):
   def key1 (self):
     ethp = self.first_packet
     ipp = ethp.find('ipv4')
-    tcpp = ethp.find('tcp')
+    ipprotp = ethp.find(self.ipprot)
 
-    return ipp.srcip,ipp.dstip,tcpp.srcport,tcpp.dstport
+    return ipp.srcip,ipp.dstip,ipprotp.srcport,ipprotp.dstport
 
   @property
   def key2 (self):
     ethp = self.first_packet
     ipp = ethp.find('ipv4')
-    tcpp = ethp.find('tcp')
+    ipprotp = ethp.find(self.ipprot)
 
-    return self.server,ipp.srcip,tcpp.dstport,tcpp.srcport
+    return self.server,ipp.srcip,ipprotp.dstport,ipprotp.srcport
 
 
 class iplb (object):
@@ -93,12 +123,17 @@ class iplb (object):
 
   We probe the servers to see if they're alive by sending them ARPs.
   """
-  def __init__ (self, connection, service_ip, servers = []):
+  def __init__ (self, connection, service_ip, servers, 
+                      police, logfile, ir,
+                      monitor_interval, preview, llp, 
+                      ipprot, probe,
+                      softtimeout, hardtimeout):
     self.service_ip = IPAddr(service_ip)
     self.servers = [IPAddr(a) for a in servers]
     self.con = connection
     self.mac = self.con.eth_addr
     self.live_servers = {} # IP -> MAC,port
+    self.immediate_reverse = ir
 
     try:
       self.log = log.getChild(dpid_to_str(self.con.dpid))
@@ -109,20 +144,31 @@ class iplb (object):
     self.outstanding_probes = {} # IP -> expire_time
 
     # How quickly do we probe?
-    self.probe_cycle_time = 5
+    self.probe_cycle_time = probe
 
     # How long do we wait for an ARP reply before we consider a server dead?
-    self.arp_timeout = 3
+    #Erik timeout de 2 para 20
+    log.info("Aumentei o arp_timeout de 2 para 20 - Erik")
+    self.arp_timeout = 20
 
-    # We remember where we directed flows so that if they start up again,
+    # We remember where we directed flows so that if they start  again,
     # we can send them to the same server if it's still up.  Alternate
     # approach: hashing.
     self.memory = {} # (srcip,dstip,srcport,dstport) -> MemoryEntry
+
+  
+    # Preciso de todos os ARPs antes de sondar os servidores
+
 
     self._do_probe() # Kick off the probing
 
     # As part of a gross hack, we now do this from elsewhere
     #self.con.addListeners(self)
+    self._start(logfile, police, monitor_interval, preview, llp, ipprot, softtimeout, hardtimeout)
+    self._show_cfg()
+
+  def __del__ (self):
+    self._stop()
 
   def _do_expire (self):
     """
@@ -167,6 +213,7 @@ class iplb (object):
     e = ethernet(type=ethernet.ARP_TYPE, src=self.mac,
                  dst=ETHER_BROADCAST)
     e.set_payload(r)
+    #Erik
     #self.log.debug("ARPing for %s", server)
     msg = of.ofp_packet_out()
     msg.data = e.pack()
@@ -184,30 +231,258 @@ class iplb (object):
     Time to wait between probes
     """
     r = self.probe_cycle_time / float(len(self.servers))
-    r = max(.25, r) # Cap it at four per second
+    #r = max(.25, r) # Cap it at four per second
+    #  Alterei para 10 segundos - Aliviar o LinkSys - ERIK
+    r = max(10, r) # Cap it at four per second
+    #self.log.info("Time???? = " + str(r))
     return r
+
+  def _start(self, logfile, police, monitor_interval, preview, llp, ipprot, sto, hto):
+
+    self.pkg_in_count = 0
+    self.match_ipprot = ipprot
+    self.ordered_servers = self.servers[:]
+    self.ordered_servers.sort()
+    self.set_police(police, monitor_interval, preview, llp)
+    self.set_timeout(sto, hto)
+
+    self.mpath = MPATH
+    self.server_load = {}
+    #self.monitor = {}
+    #for ip in self.servers:
+    #  self.monitor[ip] = open(self.mpath+str(ip)+'.load', 'r')
+    self.total_bind_count = 0
+    self.pick_count = 0
+    self.bind_count = {}
+    for ip in self.servers:
+      self.bind_count[ip] = 0
+    self.logfile = open(self._log_filename(logfile), 'w')
+    with open(self.mpath+"/pid/lb.pid", "w") as text_file:
+      text_file.write(str(os.getpid()))
+
+  def _show_cfg(self):
+    log.info("Server config:")
+    log.info("- IP                = " + str(self.service_ip))
+    log.info("- IMMEDIATE_REVERSE = " + str(self.immediate_reverse))
+    log.info("- POLICE            = " + str(POLICE_NAME[self.police]))
+    log.info("- PREVIEW           = " + str(self.preview_police))
+    log.info("- LAST_LOAD_PREVIEW = " + str(self.last_load_preview))
+    log.info("- IP_PROTOCOL       = " + str(self.match_ipprot))
+    log.info("- MONITOR_DELAY     = " + str(self.monitoring_interval))
+    log.info("- INSTANT_MONITOR   = " + str(self.instant_monitoring))
+    log.info("- PROBE_CYCLE_TIME  = " + str(self.probe_cycle_time))
+    log.info("- SOFT_TIMEOUT      = " + str(self.flow_idle_timeout))
+    log.info("- HARD_TIMEOUT      = " + str(self.flow_hard_timeout))
+    log.info("  PATH              = ../dev/pox/pox/misc/ip_loadbalancer")
+
+  def _log_filename(self, logfile):
+    if isinstance(logfile, str):
+       return self.mpath+'/tmp/'+logfile
+    name = self.mpath+'/tmp/lb'
+    name += '_'+str(self.service_ip)
+    name += '_'+str(self.immediate_reverse)
+    name += '_'+str(POLICE_NAME[self.police])
+    name += '_'+str(self.preview_police)
+    name += '_'+str(self.match_ipprot)
+    name += '_'+str(self.monitoring_interval)
+    name += '_'+str(self.probe_cycle_time)
+    name += '_'+str(self.flow_idle_timeout)
+    name += '_'+str(self.flow_hard_timeout)
+    name += '.txt'
+    return name
+
+  def _stop(self):
+    #for ip in self.servers:
+    #  self.monitor[ip].close()
+    self.logfile.close()
+    os.remove(self.mpath+"/pid/lb.pid")
+
+  def _monitoring(self):
+    self.monitoring_count += 1
+    for ip in self.servers:
+      self.server_load[ip] = (sys.float_info.max, sys.maxint, sys.float_info.max, sys.maxint)
+    for ip in self.live_servers.keys():
+      try:
+        with open(self.mpath+'/tmp/'+str(ip)+'.monitor', 'r') as mf:
+          try:
+            line = mf.readline().split()
+            self.server_load[ip] = (float(line[MONITOR_LOAD]), 
+                                    int(line[MONITOR_QUEUE]), 
+                                    float(line[MONITOR_LAST_TIME]),
+                                    int(line[MONITOR_SEQ]))
+          except:
+            self.log.info("Monitoring failure IP = %s  LINE = %s"%(ip, line))
+      except:
+        self.log.info("Monitoring failure IP = %s. Maybe service/server is down."%(ip))
 
   def _pick_server (self, key, inport):
     """
     Pick a server for a (hopefully) new connection
     """
+    self.pick_count += 1
+    if len(self.live_servers) <= 0:
+      return None
+
+    if self._monitor:
+      if self.instant_monitoring:
+        self._monitoring()
+      else:
+        now = time.time()
+        if (now - self.last_monitoring) >= self.monitoring_interval:
+          self.last_monitoring = now
+          self._monitoring()
+
+    server = self._bind_to(key, inport)
+
+    if server:
+      self.total_bind_count += 1
+      self.bind_count[server] += 1
+
+    return server
+
+  def _police_round_robin(self, key, inport):
+      tries = 0
+      num_servers = len(self.ordered_servers)
+      while tries < num_servers:
+        ip = self.ordered_servers[self.next_server]
+        self.next_server += 1
+        if self.next_server >= num_servers:
+           self.next_server = 0
+        if ip in self.live_servers.keys():
+          return ip
+      return None
+
+  def _min(self, o, i):
+     if len(o) <= 0:
+       return None
+     ip = o.keys()[0]
+     r = o[ip][i]
+     for k in o:
+       if o[k][i] < r:
+         r = o[k][i]
+         ip = k
+       elif o[k][i] == r and ip > k:
+         ip = k
+     return ip
+     
+  def _police_server_mix(self, key, inport):
+      ip = min(self.server_load, key=self.server_load.get)
+      if self.preview_police:
+          self._police_preview(ip)
+      return ip
+
+  def _police_server_load(self, key, inport):
+      ip = self._min(self.server_load, MONITOR_LOAD)
+      if self.preview_police:
+          self._police_preview(ip)
+      return ip
+
+  def _police_server_queue(self, key, inport):
+      ip = self._min(self.server_load, MONITOR_QUEUE)
+      if self.preview_police:
+          self._police_preview(ip)
+      return ip
+
+  def _police_preview(self, ip):
+      cur = self.server_load[ip]
+      if self.last_load_preview and self.server_load[ip][MONITOR_LAST_TIME] > 0:
+          pl = self.server_load[ip][MONITOR_LAST_TIME]
+      else:
+          pl = 1
+      self.server_load[ip] = (cur[MONITOR_LOAD] + cur[MONITOR_LAST_TIME], 
+                              cur[MONITOR_QUEUE] + pl,
+                              cur[MONITOR_LAST_TIME], 
+                              cur[MONITOR_SEQ] + 1)
+
+  def _police_random(self, key, inport):
     return random.choice(self.live_servers.keys())
 
+  def police_no_lb(self, key, inport):
+      self.next_server = 0
+      return self._police_round_robin(key, inport)
+
+  def set_timeout(self, sto, hto):
+    if not isinstance(sto, float):
+      # Mudei de 60.0 para 10.0
+      sto = 10.0  
+    if sto <= 0:
+      sto = 0
+    if not isinstance(hto, float):
+      hto = of.OFP_FLOW_PERMANENT
+    if hto <= 0:
+      hto = of.OFP_FLOW_PERMANENT
+    
+    self.flow_idle_timeout = sto
+    self.flow_hard_timeout = hto      
+
+
+  def set_police(self, police, monitor_interval, preview, llp):
+    self.police = police
+    self.monitoring_interval = monitor_interval
+    self.last_load_preview = llp
+    if monitor_interval > 0.0001:
+      self.instant_monitoring = False
+      #self.preview_police = True
+    else:
+      self.instant_monitoring = True
+      #self.preview_police = False
+    self.preview_police = preview
+    self.monitoring_count = 0
+    self.last_monitoring = -self.monitoring_interval
+    self.next_server = 0
+    if police == POLICE_NO_LB: 
+      self._monitor = False
+      self._bind_to = self.police_no_lb
+    elif police == POLICE_RANDOM: 
+      self._monitor = False
+      self._bind_to = self._police_random
+    elif police == POLICE_ROUND_ROBIN: 
+      self._monitor = False
+      self._bind_to = self._police_round_robin
+    elif police == POLICE_SERVER_LOAD: 
+      self._monitor = True
+      self._bind_to = self._police_server_load
+    elif police == POLICE_SERVER_QUEUE: 
+      self._monitor = True
+      self._bind_to = self._police_server_queue
+    elif police == POLICE_SERVER_MIXED: 
+      self._monitor = True
+      self._bind_to = self._police_server_mix
+    else:
+      raise Exception("Invalid police number = %d"%(police))
+
   def _handle_PacketIn (self, event):
+    #Erik
+    #import ipdb
+    #ipdb.set_trace()
+
+    self.time = time.time()
+    self.pkg_in_count += 1
     inport = event.port
     packet = event.parsed
+    self.log.info("PacketIn port = %s", inport)
 
     def drop ():
       if event.ofp.buffer_id is not None:
         # Kill the buffer
+        self.log.info("[%f,%d,%d,%d] Kill the buffer" % (self.time, self.pkg_in_count, self.total_bind_count, self.monitoring_count))
         msg = of.ofp_packet_out(data = event.ofp)
         self.con.send(msg)
       return None
 
-    tcpp = packet.find('tcp')
-    if not tcpp:
+    ipprotp = packet.find(self.match_ipprot)
+    if not ipprotp:
+      self.log.info("Not " + self.match_ipprot)
+      ipp = packet.find('ipv4')
+      if not ipp:
+        self.log.info("Not IPv4")
+      else:
+        self.log.info("IPv4 = %s"%ipp)
+           
       arpp = packet.find('arp')
       if arpp:
+        #Erik
+        self.log.info("ARP")
         # Handle replies to our server-liveness probes
         if arpp.opcode == arpp.REPLY:
           if arpp.protosrc in self.outstanding_probes:
@@ -220,27 +495,32 @@ class iplb (object):
             else:
               # Ooh, new server.
               self.live_servers[arpp.protosrc] = arpp.hwsrc,inport
-              self.log.info("Server %s up", arpp.protosrc)
+              self.log.info("[%f,%d,%d,%d] Server %s up" % (self.time, self.pkg_in_count, self.total_bind_count, self.monitoring_count, arpp.protosrc))
         return
 
       # Not TCP and not ARP.  Don't know what to do with this.  Drop it.
+      # ERIK linha original abaixo tirei a chamada de drop()
+      #return drop()
       return drop()
 
     # It's TCP.
     
     ipp = packet.find('ipv4')
 
-    if ipp.srcip in self.servers:
+    if not self.immediate_reverse and ipp.srcip in self.servers:
       # It's FROM one of our balanced servers.
       # Rewrite it BACK to the client
+      #self.log.info("FROM one of our balanced servers.")
 
-      key = ipp.srcip,ipp.dstip,tcpp.srcport,tcpp.dstport
+      key = ipp.srcip,ipp.dstip,ipprotp.srcport,ipprotp.dstport
       entry = self.memory.get(key)
 
       if entry is None:
         # We either didn't install it, or we forgot about it.
-        self.log.debug("No client for %s", key)
-        return drop()
+        self.log.info("[%f,%d,%d,%d] No client for %s" % (self.time, self.pkg_in_count, self.total_bind_count, self.monitoring_count, key))
+        # ERIK linha original abaixo tirei a chamada de drop()
+        #return drop()
+        return drop() 
 
       # Refresh time timeout and reinstall.
       entry.refresh()
@@ -257,31 +537,47 @@ class iplb (object):
       match = of.ofp_match.from_packet(packet, inport)
 
       msg = of.ofp_flow_mod(command=of.OFPFC_ADD,
-                            idle_timeout=FLOW_IDLE_TIMEOUT,
-                            hard_timeout=of.OFP_FLOW_PERMANENT,
+                            idle_timeout=self.flow_idle_timeout,
+                            hard_timeout=self.flow_hard_timeout,
                             data=event.ofp,
                             actions=actions,
                             match=match)
       self.con.send(msg)
+      self.log.info("[%f,%d,%d,%d] Reverse rule installed from %s:%d to %s:%d" % (self.time, self.pkg_in_count, self.total_bind_count, self.monitoring_count, str(ipp.srcip),ipprotp.srcport,str(ipp.dstip),ipprotp.dstport))
 
     elif ipp.dstip == self.service_ip:
+
+      #import ipdb
+      #ipdb.set_trace()
       # Ah, it's for our service IP and needs to be load balanced
+      #self.log.info("for our service IP")
 
-      # Do we already know this flow?
-      key = ipp.srcip,ipp.dstip,tcpp.srcport,tcpp.dstport
-      entry = self.memory.get(key)
-      if entry is None or entry.server not in self.live_servers:
-        # Don't know it (hopefully it's new!)
-        if len(self.live_servers) == 0:
-          self.log.warn("No servers!")
-          return drop()
+      ## Do we already know this flow?
+      key = ipp.srcip,ipp.dstip,ipprotp.srcport,ipprotp.dstport
+      #entry = self.memory.get(key)
+      #if entry is None or entry.server not in self.live_servers:
 
-        # Pick a server for this flow
-        server = self._pick_server(key, inport)
-        self.log.debug("Directing traffic to %s", server)
-        entry = MemoryEntry(server, packet, inport)
-        self.memory[entry.key1] = entry
-        self.memory[entry.key2] = entry
+      # Don't know it (hopefully it's new!)
+      if len(self.live_servers) == 0:
+        self.log.info("[%f,%d,%d,%d] No servers!"%(self.time, self.pkg_in_count, self.total_bind_count, self.monitoring_count))
+        # ERIK linha original abaixo tirei a chamada de drop()
+        #return drop()
+        return drop() 
+
+      # Pick a server for this flow
+      server = self._pick_server(key, inport)
+      self.logfile.write("%f;%d;%d;%s;%s\n"%(time.time(), self.total_bind_count, self.monitoring_count, server, str(self.server_load))) 
+      if not server:
+        self.log.info("[%f,%d,%d,%d] No picked servers!"%(self.time, self.pkg_in_count, self.total_bind_count, self.monitoring_count))
+        # ERIK linha original abaixo tirei a chamada de drop()
+        #return drop()
+        return drop() 
+
+      entry = MemoryEntry(server, packet, inport, self.match_ipprot)
+      self.memory[entry.key1] = entry
+      self.memory[entry.key2] = entry
+      #else:
+      #  self.log.info("%d,%d: Programming last memory traffic to %s -------------------------------", self.total_bind_count, self.monitoring_count, entry.server)
    
       # Update timestamp
       entry.refresh()
@@ -296,43 +592,148 @@ class iplb (object):
       match = of.ofp_match.from_packet(packet, inport)
 
       msg = of.ofp_flow_mod(command=of.OFPFC_ADD,
-                            idle_timeout=FLOW_IDLE_TIMEOUT,
-                            hard_timeout=of.OFP_FLOW_PERMANENT,
+                            idle_timeout=self.flow_idle_timeout,
+                            hard_timeout=self.flow_hard_timeout,
                             data=event.ofp,
                             actions=actions,
                             match=match)
-      self.con.send(msg)
+
+      if self.immediate_reverse:
+        ractions = []
+        ractions.append(of.ofp_action_dl_addr.set_src(self.mac))
+        ractions.append(of.ofp_action_nw_addr.set_src(self.service_ip))
+        ractions.append(of.ofp_action_output(port = inport))
+        rmatch = match.flip(port)
+        rmatch.dl_src = mac
+        rmatch.nw_src = entry.server
+        rmsg = of.ofp_flow_mod(command=of.OFPFC_ADD,
+                               idle_timeout=self.flow_idle_timeout,
+                               hard_timeout=self.flow_hard_timeout,
+                               actions=ractions,
+                               match=rmatch)
+        self.con.send(rmsg)
+        self.con.send(msg)
+        self.log.info("[%f,%d,%d,%d] Both rules installed from %s:%d to %s:%d redirect to %s" %(self.time, self.pkg_in_count, self.total_bind_count, self.monitoring_count, str(ipp.srcip),ipprotp.srcport,str(ipp.dstip),ipprotp.dstport,server))
+      else:
+        self.con.send(msg)
+        self.log.info("[%f,%d,%d,%d] Rule installed from %s:%d to %s:%d redirect to %s" %(self.time, self.pkg_in_count, self.total_bind_count, self.monitoring_count, str(ipp.srcip),ipprotp.srcport,str(ipp.dstip),ipprotp.dstport,server))
 
 
 # Remember which DPID we're operating on (first one to connect)
 _dpid = None
 
-def launch (ip, servers):
+def launch (ip, servers, police, logfile, 
+            ir = False,
+            preview = None,
+            llp = None,
+            monitor_interval = 4.0, 
+            ipprot = 'tcp', 
+            probe = 1.0,
+            sto = None,
+            hto = None):
+
   servers = servers.replace(","," ").split()
   servers = [IPAddr(x) for x in servers]
   ip = IPAddr(ip)
 
+  if isinstance(monitor_interval, str):
+    try:
+      monitor_interval = float(monitor_interval)
+    except:
+      pass
+  if (not isinstance(monitor_interval, float)):
+    monitor_interval  = 0.0
+
+  if isinstance(preview, str):
+    if preview == "True":
+      preview = True
+    else:
+      preview = False
+  if (not isinstance(preview, bool)):
+    preview = False
+
+  if isinstance(ir, str):
+    if ir == "True":
+      ir = True
+    else:
+      ir = False
+  if (not isinstance(ir, bool)):
+    ir = False  
+
+  if preview:
+    if isinstance(llp, str):
+      if llp == "True":
+        llp = True
+      else:
+        llp = False
+    if (not isinstance(llp, bool)):
+      llp = False
+  else:
+    llp = False
+ 
+  if isinstance(police, str):
+    if police in POLICE_NUMBER:
+      police = POLICE_NUMBER[police]
+    elif police.isdigit():
+      police = int(police)
+  if (not isinstance(police, int)) or ((police < 0) or (police >= len(POLICE_NAME))):
+    police = POLICE_ROUND_ROBIN
+ 
+  if isinstance(ipprot, str):
+    if ipprot not in ['tcp', 'udp']:
+       ipprot = 'tcp'
+  if (not isinstance(ipprot, str)):
+    ipprot = 'tcp'
+
+  if isinstance(probe, str) or isinstance(probe, int):
+    try:
+      probe = float(probe)
+    except:
+      pass
+  if (not isinstance(monitor_interval, float)):
+    probe  = len(servers)
+
+
   # Boot up ARP Responder
-  from proto.arp_responder import launch as arp_launch
+  #Erik Codigo Original - Gustavo - Frederico
+  #from proto.arp_responder import launch as arp_launch
+  # arp_launch(eat_packets=False,**{str(ip):True})
+  # import logging
+  # logging.getLogger("proto.arp_responder").setLevel(logging.WARN)
+  from misc.arp_responder import launch as arp_launch
   arp_launch(eat_packets=False,**{str(ip):True})
   import logging
-  logging.getLogger("proto.arp_responder").setLevel(logging.WARN)
+  logging.getLogger("misc.arp_responder").setLevel(logging.WARN)
 
   def _handle_ConnectionUp (event):
     global _dpid
     if _dpid is None:
       log.info("IP Load Balancer Ready.")
-      core.registerNew(iplb, event.connection, IPAddr(ip), servers)
+      #Erik
+      #import ipdb
+      #ipdb.set_trace()
+      core.registerNew(iplb, event.connection, IPAddr(ip), servers, police, logfile, ir, monitor_interval, preview, llp, ipprot, probe, sto, hto)
       _dpid = event.dpid
+      log.info("Datapath Id = %s ", _dpid )
+      #Erik
+      #import ipdb
+      #ipdb.set_trace()
 
     if _dpid != event.dpid:
       log.warn("Ignoring switch %s", event.connection)
     else:
       log.info("Load Balancing on %s", event.connection)
-
+      #========================================================================
+      # For test purpose, clear any configuration in Swicth
+      # create ofp_flow_mod message to delete all flows
+      # (note that flow_mods match all flows by default)
+      msg = of.ofp_flow_mod(command=of.OFPFC_DELETE)
+ 
+      event.connection.send(msg)
+      log.info("Clearing all flows from %s." % (dpidToStr(event.connection.dpid),))
+      #========================================================================
       # Gross hack
       core.iplb.con = event.connection
       event.connection.addListeners(core.iplb)
-
 
   core.openflow.addListenerByName("ConnectionUp", _handle_ConnectionUp)
