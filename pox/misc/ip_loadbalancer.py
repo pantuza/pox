@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """
 A very sloppy IP load balancer.
 
@@ -20,23 +21,34 @@ Run it with --ip=<Service IP> --servers=IP1,IP2,...
 Please submit improvements. :)
 """
 
-from pox.core import core
-import pox
-log = core.getLogger("iplb")
-
-from pox.lib.packet.ethernet import ethernet, ETHER_BROADCAST
-from pox.lib.packet.ipv4 import ipv4
-from pox.lib.packet.arp import arp
-from pox.lib.addresses import IPAddr, EthAddr
-from pox.lib.util import str_to_bool, dpid_to_str, dpidToStr
-
-import pox.openflow.libopenflow_01 as of
-
+# Python standard library
 import time
 import random
 import sys
 import os
 
+
+# Pox modules dependencies
+from pox.core import core
+log = core.getLogger("iplb")
+
+import pox.openflow.libopenflow_01 as of
+import pox
+
+
+# Load Balancing context pox dependencies 
+from pox.lib.packet.ethernet import ethernet
+from pox.lib.packet.ethernet import ETHER_BROADCAST
+from pox.lib.packet.ipv4 import ipv4
+from pox.lib.packet.arp import arp
+from pox.lib.addresses import EthAddr
+from pox.lib.addresses import IPAddr
+from pox.lib.util import str_to_bool
+from pox.lib.util import dpid_to_str
+from pox.lib.util import dpidToStr
+
+
+# Global definitions
 POLICY_NO_LB = 0
 POLICY_RANDOM = 1
 POLICY_ROUND_ROBIN = 2
@@ -60,6 +72,8 @@ MONITOR_QUEUE = 1
 MONITOR_LAST_TIME = 2
 MONITOR_SEQ = 3
 
+# This block of code has to be updated
+# Log file
 #MPATH = "/home/mininet/lb"
 MPATH = ".."
 
@@ -81,6 +95,7 @@ class MemoryEntry (object):
   the Nicira extension which can match packets with FIN set to remove them
   when the connection closes.
   """
+  
   def __init__ (self, server, first_packet, client_port, ipprot):
     self.server = server
     self.first_packet = first_packet
@@ -88,7 +103,6 @@ class MemoryEntry (object):
     self.ipprot = ipprot
     self.flow_memory_timeout = 60 * 5
     self.refresh()
-
 
   def refresh (self):
     self.timeout = time.time() + self.flow_memory_timeout
@@ -123,6 +137,7 @@ class iplb (object):
 
   We probe the servers to see if they're alive by sending them ARPs.
   """
+  
   def __init__ (self, connection, service_ip, servers, 
                       policy, logfile, ir,
                       monitor_interval, preview, llp, 
@@ -452,9 +467,6 @@ class iplb (object):
       raise Exception("Invalid policy number = %d"%(policy))
 
   def _handle_PacketIn (self, event):
-    #Erik
-    #import ipdb
-    #ipdb.set_trace()
 
     self.time = time.time()
     self.pkg_in_count += 1
@@ -499,8 +511,6 @@ class iplb (object):
         return
 
       # Not TCP and not ARP.  Don't know what to do with this.  Drop it.
-      # ERIK linha original abaixo tirei a chamada de drop()
-      #return drop()
       return drop()
 
     # It's TCP.
@@ -512,14 +522,14 @@ class iplb (object):
       # Rewrite it BACK to the client
       #self.log.info("FROM one of our balanced servers.")
 
-      key = ipp.srcip,ipp.dstip,ipprotp.srcport,ipprotp.dstport
+      key = ipp.srcip, ipp.dstip, ipprotp.srcport, ipprotp.dstport
       entry = self.memory.get(key)
 
       if entry is None:
         # We either didn't install it, or we forgot about it.
-        self.log.info("[%f,%d,%d,%d] No client for %s" % (self.time, self.pkg_in_count, self.total_bind_count, self.monitoring_count, key))
-        # ERIK linha original abaixo tirei a chamada de drop()
-        #return drop()
+        self.log.info("[%f,%d,%d,%d] No client for %s" % (self.time,
+            self.pkg_in_count, self.total_bind_count, self.monitoring_count, 
+            key))
         return drop() 
 
       # Refresh time timeout and reinstall.
@@ -543,12 +553,13 @@ class iplb (object):
                             actions=actions,
                             match=match)
       self.con.send(msg)
-      self.log.info("[%f,%d,%d,%d] Reverse rule installed from %s:%d to %s:%d" % (self.time, self.pkg_in_count, self.total_bind_count, self.monitoring_count, str(ipp.srcip),ipprotp.srcport,str(ipp.dstip),ipprotp.dstport))
+      log_msg = "[%f,%d,%d,%d] Reverse rule installed from %s:%d to %s:%d"
+      self.log.info(log_msg % (self.time, self.pkg_in_count,
+          self.total_bind_count, self.monitoring_count, str(ipp.srcip),
+          ipprotp.srcport, str(ipp.dstip), ipprotp.dstport))
 
     elif ipp.dstip == self.service_ip:
 
-      #import ipdb
-      #ipdb.set_trace()
       # Ah, it's for our service IP and needs to be load balanced
       #self.log.info("for our service IP")
 
@@ -559,18 +570,18 @@ class iplb (object):
 
       # Don't know it (hopefully it's new!)
       if len(self.live_servers) == 0:
-        self.log.info("[%f,%d,%d,%d] No servers!"%(self.time, self.pkg_in_count, self.total_bind_count, self.monitoring_count))
-        # ERIK linha original abaixo tirei a chamada de drop()
-        #return drop()
+        self.log.info("[%f,%d,%d,%d] No servers!" % (self.time, 
+            self.pkg_in_count, self.total_bind_count, self.monitoring_count))
         return drop() 
 
       # Pick a server for this flow
       server = self._pick_server(key, inport)
-      self.logfile.write("%f;%d;%d;%s;%s\n"%(time.time(), self.total_bind_count, self.monitoring_count, server, str(self.server_load))) 
+      self.logfile.write("%f;%d;%d;%s;%s\n" % (time.time(), 
+          self.total_bind_count, self.monitoring_count, 
+          server, str(self.server_load))) 
       if not server:
-        self.log.info("[%f,%d,%d,%d] No picked servers!"%(self.time, self.pkg_in_count, self.total_bind_count, self.monitoring_count))
-        # ERIK linha original abaixo tirei a chamada de drop()
-        #return drop()
+        self.log.info("[%f,%d,%d,%d] No picked servers!" % (self.time, 
+            self.pkg_in_count, self.total_bind_count, self.monitoring_count))
         return drop() 
 
       entry = MemoryEntry(server, packet, inport, self.match_ipprot)
@@ -613,10 +624,18 @@ class iplb (object):
                                match=rmatch)
         self.con.send(rmsg)
         self.con.send(msg)
-        self.log.info("[%f,%d,%d,%d] Both rules installed from %s:%d to %s:%d redirect to %s" %(self.time, self.pkg_in_count, self.total_bind_count, self.monitoring_count, str(ipp.srcip),ipprotp.srcport,str(ipp.dstip),ipprotp.dstport,server))
+        log_msg = "[%f,%d,%d,%d] Both rules installed "\
+                "from %s:%d to %s:%d redirect to %s" 
+        self.log.info(log_msg % (self.time, self.pkg_in_count, 
+            self.total_bind_count, self.monitoring_count, str(ipp.srcip),
+            ipprotp.srcport, str(ipp.dstip), ipprotp.dstport, server))
       else:
         self.con.send(msg)
-        self.log.info("[%f,%d,%d,%d] Rule installed from %s:%d to %s:%d redirect to %s" %(self.time, self.pkg_in_count, self.total_bind_count, self.monitoring_count, str(ipp.srcip),ipprotp.srcport,str(ipp.dstip),ipprotp.dstport,server))
+        log_msg = "[%f,%d,%d,%d] Rule installed "\
+                "from %s:%d to %s:%d redirect to %s"
+        self.log.info(log_msg % (self.time, self.pkg_in_count, 
+            self.total_bind_count, self.monitoring_count, str(ipp.srcip),
+            ipprotp.srcport, str(ipp.dstip), ipprotp.dstport, server))
 
 
 # Remember which DPID we're operating on (first one to connect)
@@ -695,29 +714,20 @@ def launch (ip, servers, policy, logfile,
 
 
   # Boot up ARP Responder
-  #Erik Codigo Original - Gustavo - Frederico
-  #from proto.arp_responder import launch as arp_launch
-  # arp_launch(eat_packets=False,**{str(ip):True})
-  # import logging
-  # logging.getLogger("proto.arp_responder").setLevel(logging.WARN)
-  from misc.arp_responder import launch as arp_launch
+  from proto.arp_responder import launch as arp_launch
   arp_launch(eat_packets=False,**{str(ip):True})
   import logging
-  logging.getLogger("misc.arp_responder").setLevel(logging.WARN)
+  logging.getLogger("proto.arp_responder").setLevel(logging.WARN)
 
   def _handle_ConnectionUp (event):
     global _dpid
     if _dpid is None:
       log.info("IP Load Balancer Ready.")
-      #Erik
-      #import ipdb
-      #ipdb.set_trace()
-      core.registerNew(iplb, event.connection, IPAddr(ip), servers, policy, logfile, ir, monitor_interval, preview, llp, ipprot, probe, sto, hto)
+      core.registerNew(iplb, event.connection, IPAddr(ip), servers, 
+              policy, logfile, ir, monitor_interval, preview, 
+              llp, ipprot, probe, sto, hto)
       _dpid = event.dpid
       log.info("Datapath Id = %s ", _dpid )
-      #Erik
-      #import ipdb
-      #ipdb.set_trace()
 
     if _dpid != event.dpid:
       log.warn("Ignoring switch %s", event.connection)
