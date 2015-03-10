@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 
 from time import time
+from random import randrange
+from numpy import array
 import pydot
 import matplotlib.pyplot as plt
 
@@ -23,7 +25,7 @@ class Graph (object):
   """
   Topology Graph
   """
-  
+
   def __init__ (self):
     self.log = core.getLogger()
     self.vertexes = {}
@@ -46,11 +48,14 @@ class Graph (object):
     """
     if entity.id in self.vertexes:
       vertex = self.vertexes[entity.id]
-      for edges in vertex.adjacency:
+
+      for edges in vertex.adjacency.values():
         for edge in edges:
           self.remove_edge(edge)
+
       del self.vertexes[entity.id]
-  
+      del vertex
+
   def get_vertex (self, id=None):
     """
     Returns a vertex by its id
@@ -142,26 +147,27 @@ class Graph (object):
   def to_gexf(self):
 
     node0, node1 = None, None
+    #graph = nx.Graph()
     graph = nx.Graph()
     # Creates the edges with weights
     for edge in self.edges.values():
-
       entity0 = self.vertexes[edge.key[0]].entity
+      entity1 = self.vertexes[edge.key[1]].entity
+
       if isinstance(entity0, Host):
-        node0 = "Host %s" % entity0.ip.toStr().split(".")[-1]
+        node0 = "Host %s" % entity0.mac.toStr().replace(":", "-")
         graph.add_node(node0)
       elif isinstance(entity0, Switch):
         node0 = "Switch %s" % entity0.id
-        graph.add_node(node0, color='blue')
+        graph.add_node(node0, color='red', size=200)
 
-      entity1 = self.vertexes[edge.key[1]].entity
       if isinstance(entity1, Host):
-        node1 = "Host %s" % entity1.ip.toStr().split(".")[-1]
+        node1 = "Host %s" % entity1.mac.toStr().replace(":", "-")
         graph.add_node(node1)
       elif isinstance(entity1, Switch):
         node1 = "Switch %s" % entity1.id
-        graph.add_node(node1, color='blue')
-      
+        graph.add_node(node1, color='red', size=200)
+  
       if edge.weight is not None:
         graph.add_edge(node0, node1, weight=edge.weight)
       else:
@@ -170,32 +176,33 @@ class Graph (object):
     self.log.info("Writing graph image with %d nodes...", len(self.vertexes))
 
     # color values
-    colors=[node.get('color', '#A0CBE2') for node in graph.node.values()]
+    colors=[node.get('color', 'blue') for node in graph.node.values()]
+    sizes = [node.get('size', 50) for node in graph.node.values()]
 
     nx.draw_graphviz(graph, 
-                     scale=3, 
-                     cmap = plt.get_cmap('jet'),
-                     node_color=colors,
-                     node_size=50,
-                     with_labels=False,
-                     width=1,
-                     edge_cmap=plt.cm.Blues)
+            scale=1, 
+            cmap = plt.get_cmap('jet'),
+            node_color=colors,
+            node_size=sizes,
+            with_labels=False,
+            width=0.5,
+            edge_cmap=plt.cm.Blues)
+
+    nV = len([v for v in self.vertexes.values() if isinstance(v.entity, Host)])
+    nE = len([v for v in self.vertexes.values() if isinstance(v.entity, Switch)])
+    plt.text(0, 0, "Hosts: %d\nSwitches: %d" %(nV, nE),
+             horizontalalignment='left', verticalalignment='top',
+             position=(-150,120))
     plt.draw()
     plt.savefig("graph.png", format="png", dpi=500)
-    plt.clf() 
-    nx.write_gexf(graph, "graph.gexf")
+    plt.clf()
+    #nx.write_gexf(graph, "graph.gexf")
 
   def add_edge (self, link, weight=None):
     """
     Add an Edge and insert each vertex of the Edge in the adjacency list 
     of each other
     """
-    if not hasattr(link, "id"):
-      return
-
-    if link.id in self.edges:
-      raise Exception("Link ID %s already in graph" % str(link.id))
-
     edge = Edge(link, weight)
     self.edges[edge.key] = edge
     v1 = self.get_vertex(link.entity1.id)
@@ -212,10 +219,9 @@ class Graph (object):
     Removes an Edge and its references inside adjacency list of vertexes 
     """
     
-    if edge.key not in self.edges:
-      raise Exception("Link ID %s is not in graph" % str(edge.key))
+    if edge.key in self.edges:
+      del self.edges[edge.key]
 
-    del self.edges[edge.key]
     v1 = self.get_vertex(edge.key[0])
     v2 = self.get_vertex(edge.key[1])
     
@@ -229,21 +235,24 @@ class Graph (object):
     """
     
     if core.hasComponent("topology"):
+      
       core.topology.addListenerByName("SwitchJoin", self._handle_SwitchJoin)
       core.topology.addListenerByName("SwitchLeave", self._handle_SwitchLeave)
       core.topology.addListenerByName("HostJoin", self._handle_HostJoin)
       core.topology.addListenerByName("HostLeave", self._handle_HostLeave)
       core.topology.addListenerByName("LinkJoin", self._handle_LinkJoin)
-      core.topology.addListenerByName("LinkLeave", self._handle_LinkLeave)
+      #core.topology.addListenerByName("LinkLeave", self._handle_LinkLeave)
       core.topology.addListenerByName("EntityLeave", self._handle_EntityLeave)
       core.topology.addListenerByName("EntityLeave", self._handle_EntityLeave)
+    
       if core.hasComponent("openflow"):
         core.openflow.addListenerByName("FlowStatsReceived", 
           self._handle_flow_stats)
         core.openflow.addListenerByName("PortStatsReceived", 
           self._handle_port_stats)
-        Timer(5, self._handle_timer_stats, recurring = True)
-        Timer(15, self.to_gexf, recurring = True)
+      
+        Timer(10, self._handle_timer_stats, recurring = True)
+        Timer(10, self.to_gexf, recurring = True)
 
   def _handle_timer_stats(self):
     for connection in core.openflow._connections.values():
@@ -257,8 +266,8 @@ class Graph (object):
     stats = flow_stats_to_list(event.stats)
     for entry in stats:
       host = core.topology.getEntityByID(EthAddr(entry['match']['dl_dst']))
-      switch = core.topology.getEntityByID(event.dpid)
-      key = (switch.id, host.id)
+      switch = core.topology.getEntityByID(event.connection.dpid)
+      #key = (switch.id, host.id)
 
       try:
         weight = entry['byte_count'] - self.edges[key].weight
@@ -278,7 +287,7 @@ class Graph (object):
       port = entry['port_no']
       for v in self.vertexes.values():
         if isinstance(v.entity, Host):
-          if v.entity.switch.id == event.dpid and v.entity.port.number == port:
+          if v.entity.switch.id == event.connection.dpid and v.entity.port.number == port:
             
             edge_key = (v.entity.switch.id, v.entity.id)
             nbytes = entry['rx_bytes'] + entry['tx_bytes']
@@ -289,7 +298,7 @@ class Graph (object):
         
         elif isinstance(v.entity, Switch):
           for edge in self.edges.values():
-            if edge.type == Edge.TYPES[1] and v.entity.id == event.dpid:
+            if edge.type == Edge.TYPES[1] and v.entity.id == event.connection.dpid:
               nbytes = entry['rx_bytes'] + entry['tx_bytes']
              # if v.entity.id == edge.key[0]:
               try:
@@ -315,57 +324,63 @@ class Graph (object):
     self.log.info("SwitchJoin id: %s", str(event.switch.id))
     self.add_vertex(event.switch)
 
-    self.log.info(", ".join([str(vertex) for vertex in self.vertexes]))
-
   def _handle_HostJoin (self, event):
     """  """
-    self.log.info("HostJoin id: %s", str(event.host.id))
+    self.log.info("HostJoin id: %s", event.host.id)
     self.add_vertex(event.host)
 
     if event.host.switch is not None:
       # Add the unknown switch as a vertex
       if not self.get_vertex(event.host.switch.id):
         self.add_vertex(event.host.switch)
-      
+
       self.add_edge(Link(event.host.switch, event.host))
-    
-  
-#    self.log.info(", ".join([str(vertex) for vertex in self.vertexes]))
-    #self.log.info(str(self.edges))
 
   def _handle_SwitchLeave (self, event):
     """  """
-    self.log.info("SwitchLeave event")
-    self.remove_vertex(event.switch)
+    self.log.info("SwitchLeave: %s" % event.entity.id)
+    self.remove_vertex(event.entity)
     
   def _handle_HostLeave (self, event):
     """  """
-    self.log.info("HostLeave event")
-    self.remove_vertex(event.host) 
+    self.log.info("HostLeave: %s" % event.host.id)
+    self.remove_vertex(event.host)
 
   def _handle_EntityJoin (self, event):
     """  """
-    self.log.info("EntityJoin event")
+    self.log.info("EntityJoin: %s" % event.entity.id)
     self.add_vertex(event.entity)
   
   def _handle_EntityLeave (self, event):
     """  """
-    self.log.info("EntityLeave event")
+    self.log.info("EntityLeave: %s" % event.entity.id)
     self.remove_vertex(event.entity)
 
   def _handle_LinkJoin (self, event):
     """  """
-    self.log.info("LinkJoin fired")
+    
+    key0 = (event.link.entity1.id, event.link.entity2.id)
+    key1 = (event.link.entity2.id, event.link.entity1.id)
+
+    if key0 in self.edges.keys() or key1 in self.edges.keys():
+      return
+
+    link = (event.link.entity1.id, 
+            event.link.entity2.id,
+            event.link.port1,
+            event.link.port2)
+    
+    self.log.info("LinkJoin: %s - edges: %d" % (str(link), len(self.edges)))
     self.add_edge(event.link)
 
   def _handle_LinkLeave (self, event):
     """  """
-    self.log.info("LinkLeave fired")
-    try:
-      edge = self.edges[(event.link.entity1.id, event.link.entity2.id)]
-      #self.remove_edge(edge)
-    except KeyError:
-      return
+    link = (event.link.entity1.id, event.link.entity2.id)
+    self.log.info("LinkLeave: switch %s -- switch %s" % link)
+    
+    if event.link in self.edges.keys():
+      edge = self.edges[event.link]
+      self.remove_edge(edge)
 
 
 def launch ():
