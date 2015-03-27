@@ -38,7 +38,6 @@ class Graph (object):
     """
     Add a new Graph Entity (Vertex) to the graph vertixes
     """
-    
     if entity.id not in self.vertexes:
       self.vertexes[entity.id] = Vertex(entity)
   
@@ -173,8 +172,6 @@ class Graph (object):
       else:
         graph.add_edge(node0, node1, weight=0)
 
-    self.log.info("Writing graph image with %d nodes...", len(self.vertexes))
-
     # color values
     colors=[node.get('color', 'blue') for node in graph.node.values()]
     sizes = [node.get('size', 50) for node in graph.node.values()]
@@ -188,11 +185,14 @@ class Graph (object):
             width=0.5,
             edge_cmap=plt.cm.Blues)
 
-    nV = len([v for v in self.vertexes.values() if isinstance(v.entity, Host)])
-    nE = len([v for v in self.vertexes.values() if isinstance(v.entity, Switch)])
-    plt.text(0, 0, "Hosts: %d\nSwitches: %d" %(nV, nE),
+    nH = len([v for v in self.vertexes.values() if isinstance(v.entity, Host)])
+    nS = len([v for v in self.vertexes.values() if isinstance(v.entity, Switch)])
+    plt.text(0, 0, "Hosts: %d\nSwitches: %d" %(nH, nS),
              horizontalalignment='left', verticalalignment='top',
              position=(-150,120))
+
+    self.log.info("Writing graph image with %d switches and %d hosts..." % (nS,
+        nH))
     plt.draw()
     plt.savefig("graph.png", format="png", dpi=500)
     plt.clf()
@@ -212,7 +212,7 @@ class Graph (object):
       v1.add_adjacency(v2, edge)
       v2.add_adjacency(v1, edge)
 
-    self.net_manager.mst()
+    #self.net_manager.mst()
 
   def remove_edge (self, edge):
     """
@@ -251,8 +251,8 @@ class Graph (object):
         core.openflow.addListenerByName("PortStatsReceived", 
           self._handle_port_stats)
       
-        Timer(10, self._handle_timer_stats, recurring = True)
-        Timer(10, self.to_gexf, recurring = True)
+        #Timer(10, self._handle_timer_stats, recurring = True)
+        Timer(20, self.to_gexf, recurring = True)
 
   def _handle_timer_stats(self):
     for connection in core.openflow._connections.values():

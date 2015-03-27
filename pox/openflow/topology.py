@@ -75,6 +75,7 @@ class OpenFlowTopology (object):
       sw2.ports[link.port2].entities.discard(sw1)
 
   def _handle_openflow_ConnectionUp (self, event):
+
     sw = self.topology.getEntityByID(event.dpid)
     add = False
     if sw is None:
@@ -88,7 +89,6 @@ class OpenFlowTopology (object):
     log.info("Switch " + dpidToStr(event.dpid) + " connected")
     if add:
       self.topology.addEntity(sw)
-      sw.raiseEvent(SwitchJoin, sw)
 
   def _handle_openflow_ConnectionDown (self, event):
     sw = self.topology.getEntityByID(event.dpid)
@@ -183,6 +183,7 @@ class OpenFlowSwitch (EventMixin, Switch):
     Switch.__init__(self, id=dpid)
     EventMixin.__init__(self)
     self.dpid = dpid
+    self.id = dpid
     self.ports = {}
     self.flow_table = OFSyncFlowTable(self)
     self.capabilities = 0

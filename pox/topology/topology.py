@@ -254,14 +254,18 @@ class Topology (EventMixin):
 
   def addEntity (self, entity):
     """ Will raise an exception if entity.id already exists """
+
     if entity.id in self._entities:
       raise RuntimeError("Entity exists")
+    
     self._entities[entity.id] = entity
+
     self.log.debug(str(entity) + " (id: " + str(entity.id) + ") joined")
-    if isinstance(entity, Switch):
-      self.raiseEvent(SwitchJoin, entity)
-    elif isinstance(entity, Host):
+
+    if isinstance(entity, Host):
       self.raiseEvent(HostJoin, entity)
+    elif isinstance(entity, Switch):
+      self.raiseEvent(SwitchJoin, entity)
     else:
       self.raiseEvent(EntityJoin, entity)
 
